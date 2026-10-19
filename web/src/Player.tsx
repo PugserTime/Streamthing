@@ -4,8 +4,7 @@ import { useApp } from './App';
 import { Btn, Glyph, Icon, useBack } from './ui';
 import 'lite-youtube-embed';
 
-// One full-screen player for everything: local files (<video>), YouTube, and direct media URLs.
-export type Source = { kind: 'file'; id: number } | { kind: 'youtube'; id: string } | { kind: 'remote'; url: string } | { kind: 'iframe'; url: string }; // → ADDED iframe
+export type Source = { kind: 'file'; id: number } | { kind: 'youtube'; id: string } | { kind: 'remote'; url: string } | { kind: 'iframe'; url: string };
 type Props = { source: Source; title: string; subtitle?: string; actions?: ReactNode; thumb?: string; onClose: () => void; volume?: number; resume?: boolean; saveProgress?: boolean };
 export type Track = { id: string; lang: string; label: string; raw?: any; native?: boolean; auto?: boolean };
 
@@ -85,6 +84,7 @@ function youtubeEngine(host: HTMLElement, id: string, ev: Ev, volume: number, wa
     destroy: () => { dead = true; clearInterval(poll); clearInterval(capPoll); try { p?.destroy?.(); } catch {} host.innerHTML = ''; },
   };
 }
+
 // ---------- local file via <video> ----------
 const MEDIA_ERR: Record<number, string> = { 1: 'Playback was stopped.', 2: 'The file couldn\'t be read. Is the drive still connected?', 3: 'The file is damaged or uses a format that failed to decode.', 4: 'This video uses a format the player can\'t decode. MP4 (H.264/AAC) and WebM work best; many MKV files use HEVC or AC3 audio, which won\'t play here.' };
 function fileEngine(host: HTMLElement, id: number, ev: Ev, volume: number, attempt: number): Engine {
@@ -103,12 +103,10 @@ function fileEngine(host: HTMLElement, id: number, ev: Ev, volume: number, attem
   };
 }
 
-// Direct media URLs (mp4/webm) — user's own or authorized streams.
+// Direct media URLs
 function remoteEngine(host: HTMLElement, url: string, ev: Ev, volume: number): Engine {
   const parsed = new URL(url);
-  if (parsed.protocol !== 'https:' && parsed.hostname !== 'localhost' && parsed.hostname !== '127.0.0.1') {
-    throw new Error('Streaming URLs must use HTTPS (or localhost for testing).');
-  }
+  if (parsed.protocol !== 'https:' && parsed.hostname !== 'localhost' && parsed.hostname !== '127.0.0.1') throw new Error('Streaming URLs must use HTTPS (or localhost).');
   const v = document.createElement('video'); v.autoplay = true; v.playsInline = true; v.preload = 'auto'; v.volume = volume; v.src = parsed.href;
   v.onloadedmetadata = () => ev.onReady(v.duration); v.ontimeupdate = () => ev.onTime(v.currentTime, v.duration);
   v.onplaying = () => ev.onState('playing'); v.onpause = () => ev.onState('paused'); v.onwaiting = () => ev.onState('buffering'); v.onended = () => ev.onState('ended');
@@ -123,9 +121,7 @@ function remoteEngine(host: HTMLElement, url: string, ev: Ev, volume: number): E
   };
 }
 
-// → ADDED: iframe engine for provider embed pages. Renders the URL in an <iframe>. The provider's own
-// controls are used; our seek bar and transport buttons are hidden in the render for iframe sources.
-// The "Open in browser" button in the top bar is the escape hatch when X-Frame-Options blocks the frame.
+// Provider iframe engine
 function iframeEngine(host: HTMLElement, url: string, ev: Ev): Engine {
   const wrap = document.createElement('div');
   wrap.style.cssText = 'position:absolute;inset:0;background:#000;';
@@ -146,6 +142,7 @@ function iframeEngine(host: HTMLElement, url: string, ev: Ev): Engine {
   };
 }
 
+// Subtitles
 type Cue = { a: number; b: number; text: string };
 function parseVtt(txt: string): Cue[] {
   const ts = (x: string) => { const p = x.trim().split(':').map(Number); return p.length === 3 ? p[0] * 3600 + p[1] * 60 + p[2] : p[0] * 60 + p[1]; };
@@ -212,8 +209,8 @@ export default function Player({ source, title, subtitle, actions, thumb, onClos
   const [nowQ, setNowQ] = useState('');
   const yt = source.kind === 'youtube';
   const remote = source.kind === 'remote';
-  const iframe = source.kind === 'iframe'; // → ADDED
-  const ref = yt ? `yt:${source.id}` : remote ? `remote:${source.url}` : iframe ? `iframe:${source.url}` : `local:${source.id}`; // → ADDED iframe branch
+  const iframe = source.kind === 'iframe';
+  const ref = yt ? `yt:${source.id}` : remote ? `remote:${source.url}` : iframe ? `iframe:${source.url}` : `local:${source.id}`;
   const last = useRef(0), hideT = useRef<any>(), osdT = useRef<any>(), resumeAt = useRef<number | null>(null), tRef = useRef(0), dRef = useRef(0), stRef = useRef(state); stRef.current = state;
   useBack(() => menu ? setMenu(menu === 'main' ? null : 'main') : onClose());
   useEffect(() => { setOverlay(true); return () => setOverlay(false); }, []); // eslint-disable-line
@@ -233,13 +230,13 @@ export default function Player({ source, title, subtitle, actions, thumb, onClos
       onError: (msg, url) => setErr({ msg, url }),
       onTracks: list => { setTracks(list); setTrack(cur => cur ?? (wantLang ? list.find(x => x.lang === wantLang && !x.auto) || list.find(x => x.lang === wantLang) || null : null)); },
     };
-    const e = yt ? youtubeEngine(stage.current, source.id, ev, volume, wantLang, SIZES.find(x => x[0] === subSize)?.[2] ?? 0, ytQ) : remote ? remoteEngine(stage.current, source.url, ev, volume) : iframe ? iframeEngine(stage.current, source.url, ev) : fileEngine(stage.current, source.id, ev, volume, attempt); // → ADDED iframe branch
+    const e = yt ? youtubeEngine(stage.current, source.id, ev, volume, wantLang, SIZES.find(x => x[0] === subSize)?.[2] ?? 0, ytQ) : remote ? remoteEngine(stage.current, source.url, ev, volume) : iframe ? iframeEngine(stage.current, source.url, ev) : fileEngine(stage.current, source.id, ev, volume, attempt);
     eng.current = e; const r = stage.current.getBoundingClientRect(); e.layout(r.width, r.height, fill, ytQ);
     if (yt) api<{ tracks: any[] }>(`/ytcaptions?id=${encodeURIComponent(source.id)}`, {}, 1)
       .then(x => { if (x.tracks.length) ev.onTracks(x.tracks.map(t => ({ id: t.id, lang: t.lang, label: t.label, auto: t.auto }))); else e.nativeCaptions?.(); })
       .catch(() => e.nativeCaptions?.());
-    if (resume && !iframe) api(`/progress?ref=${encodeURIComponent(ref)}`).then(p => { if (p && p.pos > 5 && p.pos < p.dur - 10) { resumeAt.current = p.pos; if (dRef.current) tryResume(dRef.current); } }).catch(() => {}); // → ADDED !iframe guard
-    if (!iframe) playBtn.current?.focus(); // → ADDED !iframe guard
+    if (resume && !iframe) api(`/progress?ref=${encodeURIComponent(ref)}`).then(p => { if (p && p.pos > 5 && p.pos < p.dur - 10) { resumeAt.current = p.pos; if (dRef.current) tryResume(dRef.current); } }).catch(() => {});
+    if (!iframe) playBtn.current?.focus();
     const ap = setTimeout(() => { if (stRef.current === 'loading') setState('paused'); }, 8000);
     return () => { save(true); e.destroy(); eng.current = null; clearTimeout(hideT.current); clearTimeout(ap); };
   }, [ref, attempt]); // eslint-disable-line
@@ -305,10 +302,10 @@ export default function Player({ source, title, subtitle, actions, thumb, onClos
       {opt('reset', offset === 0, 'Reset', () => setOffset(0))}</>}
   </div>;
 
-  return <div ref={wrap} className={'overlay player' + (hidden && !err && !menu ? ' hide' : '')} data-modal onMouseMove={wake} data-subsize={subSize}>
+  return <div ref={wrap} className={'overlay player' + (hidden && !err && !menu && !iframe ? ' hide' : '')} data-modal onMouseMove={wake} data-subsize={subSize}>
     <div ref={stage} className={'stage' + (yt ? ' yt' : '')} />
     {yt && !started && <div className="cover" style={thumb ? { backgroundImage: `url(${thumb})` } : undefined} />}
-    {!iframe && <div className="shield" onClick={() => menu ? setMenu(null) : toggle()} onDoubleClick={full} />} {/* → ADDED !iframe: iframe needs its own clicks */}
+    {!iframe && <div className="shield" onClick={() => menu ? setMenu(null) : toggle()} onDoubleClick={full} />}
     {cueText && !iframe && <div className="subs" dangerouslySetInnerHTML={{ __html: cueHtml(cueText) }} />}
     {osd && !iframe && <div className="osd">{osd}</div>}
     {(state === 'loading' || state === 'buffering') && !err && !iframe && <div className="msg"><div className="spinner" aria-label="Loading" /></div>}
@@ -316,9 +313,11 @@ export default function Player({ source, title, subtitle, actions, thumb, onClos
     {err && <div className="msg"><div><h2>Can't play “{title}”</h2><p>{err.msg}</p><div className="row">
       {!yt || !err.url ? <Btn primary onClick={() => setAttempt(x => x + 1)}>Try again</Btn> : <Btn primary onClick={() => window.open(err.url, '_blank')}>Open on YouTube</Btn>}
       <Btn onClick={onClose}>Back</Btn></div></div></div>}
+    
+    {/* The chrome is set to z-index 50 in CSS to sit above the iframe */}
     <div className="chrome" {...(menu ? { inert: '' } : {}) as any}>
       <div className="ptop"><Btn icon={Icon.back} onClick={onClose}>Back</Btn><div className="ptitle"><h2>{title}</h2>{subtitle && <small>{subtitle}</small>}</div>{actions}</div>
-      {!err && state !== 'ended' && !iframe && <div className="pbottom"> {/* → ADDED !iframe: hide our transport bar for iframe */}
+      {!err && state !== 'ended' && !iframe && <div className="pbottom">
         <SeekBar t={t} d={d} buf={buf} onScrub={on => { scrubRef.current = on; setScrub(on); wake(); }} previewSrc={yt || remote ? undefined : `/api/library/file/${(source as any).id}?preview`} onCommit={n => { eng.current?.seek(n); tRef.current = n; setT(n); flash(`Jumped to ${fmt(n)}`); wake(); }} />
         <div className="times"><span>{fmt(t)}</span>{scrub ? <span className="hint">OK to jump · Back to cancel</span> : <span />}<span>−{fmt(Math.max(0, d - t))}</span></div>
         <div className="row">
