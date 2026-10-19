@@ -3,9 +3,29 @@ import { api, put, fmt } from './api';
 import { useApp } from './App';
 import { Btn, Glyph, Icon, useBack } from './ui';
 import 'lite-youtube-embed';
+import Hls from 'hls.js';
+import { Cue } from './config/subtitles';
 
-export type Source = { kind: 'file'; id: number } | { kind: 'youtube'; id: string } | { kind: 'remote'; url: string } | { kind: 'iframe'; url: string };
-type Props = { source: Source; title: string; subtitle?: string; actions?: ReactNode; thumb?: string; onClose: () => void; volume?: number; resume?: boolean; saveProgress?: boolean };
+export type Source = 
+  | { kind: 'file'; id: number } 
+  | { kind: 'youtube'; id: string } 
+  | { kind: 'remote'; url: string } 
+  | { kind: 'iframe'; url: string }
+  | { kind: 'direct'; url: string; type?: 'hls' | 'mp4' };
+
+type Props = { 
+  source: Source; 
+  title: string; 
+  subtitle?: string; 
+  actions?: ReactNode; 
+  thumb?: string; 
+  onClose: () => void; 
+  volume?: number; 
+  resume?: boolean; 
+  saveProgress?: boolean;
+  cues?: Cue[]; // External subtitles
+};
+
 export type Track = { id: string; lang: string; label: string; raw?: any; native?: boolean; auto?: boolean };
 
 interface Engine { play(): void; pause(): void; seek(t: number): void; time(): number; dur(): number; buffered(): number; setVolume(v: number): void; setMuted(m: boolean): void; setRate(r: number): void; rates(): number[];
@@ -20,10 +40,10 @@ let ytLoad: Promise<any> | null = null;
 export function loadYT(): Promise<any> {
   const w = window as any; if (w.YT?.Player) return Promise.resolve(w.YT);
   if (!ytLoad) ytLoad = new Promise((ok, no) => {
-    const t = setTimeout(() => { ytLoad = null; no(new Error('The YouTube player didn\'t load. Check the internet connection.')); }, 15000);
+    const t = setTimeout(() => { ytLoad = null; no(new Error('The YouTube player didn\'t load.')); }, 15000);
     const prev = w.onYouTubeIframeAPIReady; w.onYouTubeIframeAPIReady = () => { clearTimeout(t); prev?.(); ok(w.YT); };
     const s = document.createElement('script'); s.src = 'https://www.youtube.com/iframe_api'; s.async = true;
-    s.onerror = () => { clearTimeout(t); ytLoad = null; s.remove(); no(new Error('The YouTube player couldn\'t be loaded. Check the internet connection.')); };
+    s.onerror = () => { clearTimeout(t); ytLoad = null; s.remove(); no(new Error('The YouTube player couldn\'t be loaded.')); };
     document.head.appendChild(s);
   });
   return ytLoad;
@@ -86,7 +106,7 @@ function youtubeEngine(host: HTMLElement, id: string, ev: Ev, volume: number, wa
 }
 
 // ---------- local file via <video> ----------
-const MEDIA_ERR: Record<number, string> = { 1: 'Playback was stopped.', 2: 'The file couldn\'t be read. Is the drive still connected?', 3: 'The file is damaged or uses a format that failed to decode.', 4: 'This video uses a format the player can\'t decode. MP4 (H.264/AAC) and WebM work best; many MKV files use HEVC or AC3 audio, which won\'t play here.' };
+const MEDIA_ERR: Record<number, string> = { 1: 'Playback was stopped.', 2: 'The file couldn\'t be read.', 3: 'The file is damaged.', 4: 'This video uses a format the player can\'t decode.' };
 function fileEngine(host: HTMLElement, id: number, ev: Ev, volume: number, attempt: number): Engine {
   const v = document.createElement('video'); v.autoplay = true; v.playsInline = true; v.preload = 'auto'; v.volume = volume; v.src = `/api/library/file/${id}?r=${attempt}`;
   v.onloadedmetadata = () => ev.onReady(v.duration); v.ontimeupdate = () => ev.onTime(v.currentTime, v.duration);
@@ -103,36 +123,43 @@ function fileEngine(host: HTMLElement, id: number, ev: Ev, volume: number, attem
   };
 }
 
-// Direct media URLs
-function remoteEngine(host: HTMLElement, url: string, ev: Ev, volume: number): Engine {
-  const parsed = new URL(url);
-  if (parsed.protocol !== 'https:' && parsed.hostname !== 'localhost' && parsed.hostname !== '127.0.0.1') throw new Error('Streaming URLs must use HTTPS (or localhost).');
-  const v = document.createElement('video'); v.autoplay = true; v.playsInline = true; v.preload = 'auto'; v.volume = volume; v.src = parsed.href;
+// ---------- remote/direct stream via <video> + hls.js ----------
+function directEngine(host: HTMLElement, url: string, type: 'hls' | 'mp4' | undefined, ev: Ev, volume: number): Engine {
+  const v = document.createElement('video'); v.autoplay = true; v.playsInline = true; v.preload = 'auto'; v.volume = volume;
+  let hls: Hls | null = null;
+
+  if (type === 'hls' && Hls.isSupported()) {
+    hls = new Hls();
+    hls.loadSource(url);
+    hls.attachMedia(v);
+    hls.on(Hls.Events.ERROR, (_event, data) => {
+      if (data.fatal) ev.onError('HLS stream failed to load. Try another source.');
+    });
+  } else {
+    v.src = url; // Native MP4 or Safari native HLS
+  }
+
   v.onloadedmetadata = () => ev.onReady(v.duration); v.ontimeupdate = () => ev.onTime(v.currentTime, v.duration);
   v.onplaying = () => ev.onState('playing'); v.onpause = () => ev.onState('paused'); v.onwaiting = () => ev.onState('buffering'); v.onended = () => ev.onState('ended');
-  v.onerror = () => ev.onError('This URL did not provide a playable video. Check the link, format, CORS policy, and whether the source permits playback in this app.', parsed.href);
+  v.onerror = () => ev.onError('This URL did not provide a playable video. Check the link, format, or CORS policy.');
   host.appendChild(v);
   return {
     play: () => { v.play().catch(() => {}); }, pause: () => v.pause(), seek: t => { v.currentTime = Math.max(0, Math.min(v.duration || t, t)); }, time: () => v.currentTime, dur: () => v.duration || 0,
     buffered: () => { try { const b = v.buffered, n = v.currentTime; for (let i = 0; i < b.length; i++) if (b.start(i) <= n + 1 && b.end(i) >= n) return b.end(i) / (v.duration || 1); } catch {} return 0; },
     setVolume: x => { v.volume = x; }, setMuted: m => { v.muted = m; }, setRate: r => { v.playbackRate = r; }, rates: () => [0.5, 0.75, 1, 1.25, 1.5, 2],
     setTrack: () => {}, setSubSize: () => {}, layout: (_w, _h, fill) => { v.style.objectFit = fill ? 'cover' : 'contain'; },
-    destroy: () => { v.pause(); v.removeAttribute('src'); v.load(); v.remove(); },
+    destroy: () => { if (hls) hls.destroy(); v.pause(); v.removeAttribute('src'); v.load(); v.remove(); },
   };
 }
 
-// Provider iframe engine
+// ---------- iframe ----------
 function iframeEngine(host: HTMLElement, url: string, ev: Ev): Engine {
-  const wrap = document.createElement('div');
-  wrap.style.cssText = 'position:absolute;inset:0;background:#000;';
-  const frame = document.createElement('iframe');
-  frame.src = url;
+  const wrap = document.createElement('div'); wrap.style.cssText = 'position:absolute;inset:0;background:#000;';
+  const frame = document.createElement('iframe'); frame.src = url;
   frame.setAttribute('allow', 'autoplay; fullscreen; encrypted-media; picture-in-picture; clipboard-write');
-  frame.setAttribute('allowfullscreen', 'true');
-  frame.setAttribute('referrerpolicy', 'no-referrer');
+  frame.setAttribute('allowfullscreen', 'true'); frame.setAttribute('referrerpolicy', 'no-referrer');
   frame.style.cssText = 'width:100%;height:100%;border:0;display:block;';
-  wrap.appendChild(frame);
-  host.appendChild(wrap);
+  wrap.appendChild(frame); host.appendChild(wrap);
   frame.onload = () => { ev.onReady(0); ev.onState('playing'); };
   return {
     play: () => {}, pause: () => {}, seek: () => {}, time: () => 0, dur: () => 0, buffered: () => 0,
@@ -142,15 +169,6 @@ function iframeEngine(host: HTMLElement, url: string, ev: Ev): Engine {
   };
 }
 
-// Subtitles
-type Cue = { a: number; b: number; text: string };
-function parseVtt(txt: string): Cue[] {
-  const ts = (x: string) => { const p = x.trim().split(':').map(Number); return p.length === 3 ? p[0] * 3600 + p[1] * 60 + p[2] : p[0] * 60 + p[1]; };
-  const out: Cue[] = [];
-  for (const block of txt.split(/\n{2,}/)) { const lines = block.split('\n'); const i = lines.findIndex(l => l.includes('-->')); if (i < 0) continue;
-    const [a, b] = lines[i].split('-->'); const text = lines.slice(i + 1).join('\n').trim(); if (text) out.push({ a: ts(a), b: ts(b.trim().split(/\s+/)[0]), text }); }
-  return out.sort((x, y) => x.a - y.a);
-}
 const cueHtml = (t: string) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/&lt;(\/?)(i|b|u)&gt;/g, '<$1$2>').replace(/\{\\[^}]*\}/g, '').replace(/\n/g, '<br>');
 const SIZES: [string, string, number][] = [['s', 'Small', -1], ['m', 'Medium', 0], ['l', 'Large', 1], ['xl', 'Extra large', 2]];
 
@@ -196,31 +214,32 @@ function SeekBar({ t, d, buf, onCommit, onScrub, previewSrc }: { t: number; d: n
   </div>;
 }
 
-export default function Player({ source, title, subtitle, actions, thumb, onClose, volume = 0.8, resume = true, saveProgress = true }: Props) {
+export default function Player({ source, title, subtitle, actions, thumb, onClose, volume = 0.8, resume = true, saveProgress = true, cues = [] }: Props) {
   const { s: prefs, save: savePrefs, setOverlay } = useApp();
   const wrap = useRef<HTMLDivElement>(null), stage = useRef<HTMLDivElement>(null), playBtn = useRef<HTMLButtonElement>(null), eng = useRef<Engine | null>(null);
   const [t, setT] = useState(0), [d, setD] = useState(0), [state, setState] = useState<'loading' | 'playing' | 'paused' | 'buffering' | 'ended'>('loading');
   const [err, setErr] = useState<{ msg: string; url?: string } | null>(null), [attempt, setAttempt] = useState(0), [muted, setMuted] = useState(false), [rate, setRate] = useState(1);
   const [hidden, setHidden] = useState(false), [osd, setOsd] = useState(''), [started, setStarted] = useState(false);
-  const [tracks, setTracks] = useState<Track[]>([]), [track, setTrack] = useState<Track | null>(null), [cues, setCues] = useState<Cue[]>([]), [cueText, setCueText] = useState(''), [offset, setOffset] = useState(0);
+  const [tracks, setTracks] = useState<Track[]>([]), [track, setTrack] = useState<Track | null>(null), [cueText, setCueText] = useState('');
   const [scrub, setScrub] = useState(false), [buf, setBuf] = useState(0); const scrubRef = useRef(false);
   const [menu, setMenu] = useState<null | 'main' | 'subs' | 'size' | 'speed' | 'picture' | 'timing' | 'quality'>(null);
   const subSize = (prefs as any).subSize || 'm', fill = (prefs as any).picture === 'fill', ytQ: string = (prefs as any).ytQuality || 'auto';
   const [nowQ, setNowQ] = useState('');
   const yt = source.kind === 'youtube';
   const remote = source.kind === 'remote';
+  const direct = source.kind === 'direct';
   const iframe = source.kind === 'iframe';
-  const ref = yt ? `yt:${source.id}` : remote ? `remote:${source.url}` : iframe ? `iframe:${source.url}` : `local:${source.id}`;
+  const ref = yt ? `yt:${source.id}` : direct ? `direct:${source.url}` : remote ? `remote:${source.url}` : iframe ? `iframe:${source.url}` : `local:${source.id}`;
   const last = useRef(0), hideT = useRef<any>(), osdT = useRef<any>(), resumeAt = useRef<number | null>(null), tRef = useRef(0), dRef = useRef(0), stRef = useRef(state); stRef.current = state;
   useBack(() => menu ? setMenu(menu === 'main' ? null : 'main') : onClose());
   useEffect(() => { setOverlay(true); return () => setOverlay(false); }, []); // eslint-disable-line
-  const save = (force = false) => { if (!saveProgress) return; const tt = tRef.current, dd = dRef.current; if (!dd || tt < 1 || (!force && Date.now() - last.current < 10000)) return; last.current = Date.now(); put('/progress', { ref, pos: tt, dur: dd, title, mode: yt ? 'youtube' : remote ? 'stream' : 'mymedia' }).catch(() => {}); };
+  const save = (force = false) => { if (!saveProgress) return; const tt = tRef.current, dd = dRef.current; if (!dd || tt < 1 || (!force && Date.now() - last.current < 10000)) return; last.current = Date.now(); put('/progress', { ref, pos: tt, dur: dd, title, mode: yt ? 'youtube' : (remote || direct) ? 'stream' : 'mymedia' }).catch(() => {}); };
   const wake = () => { setHidden(false); clearTimeout(hideT.current); hideT.current = setTimeout(() => setHidden(h => stRef.current === 'playing' && !menuRef.current && !scrubRef.current ? true : h), 3500); };
   const menuRef = useRef(menu); menuRef.current = menu;
   const flash = (x: string) => { setOsd(x); clearTimeout(osdT.current); osdT.current = setTimeout(() => setOsd(''), 1000); };
 
   useEffect(() => {
-    if (!stage.current) return; setErr(null); setState('loading'); setStarted(false); setTracks([]); setTrack(null); setCues([]);
+    if (!stage.current) return; setErr(null); setState('loading'); setStarted(false); setTracks([]); setTrack(null);
     const tryResume = (dd: number) => { const r = resumeAt.current; if (r == null || !dd) return; resumeAt.current = null; if (r < dd - 10) { eng.current?.seek(r); tRef.current = r; setT(r); flash(`Resumed at ${fmt(r)}`); } };
     const wantLang = (prefs as any).subLang || '';
     const ev: Ev = {
@@ -230,7 +249,11 @@ export default function Player({ source, title, subtitle, actions, thumb, onClos
       onError: (msg, url) => setErr({ msg, url }),
       onTracks: list => { setTracks(list); setTrack(cur => cur ?? (wantLang ? list.find(x => x.lang === wantLang && !x.auto) || list.find(x => x.lang === wantLang) || null : null)); },
     };
-    const e = yt ? youtubeEngine(stage.current, source.id, ev, volume, wantLang, SIZES.find(x => x[0] === subSize)?.[2] ?? 0, ytQ) : remote ? remoteEngine(stage.current, source.url, ev, volume) : iframe ? iframeEngine(stage.current, source.url, ev) : fileEngine(stage.current, source.id, ev, volume, attempt);
+    const e = yt ? youtubeEngine(stage.current, source.id, ev, volume, wantLang, SIZES.find(x => x[0] === subSize)?.[2] ?? 0, ytQ) 
+      : direct ? directEngine(stage.current, source.url, source.type, ev, volume)
+      : remote ? directEngine(stage.current, source.url, 'mp4', ev, volume)
+      : iframe ? iframeEngine(stage.current, source.url, ev) 
+      : fileEngine(stage.current, source.id, ev, volume, attempt);
     eng.current = e; const r = stage.current.getBoundingClientRect(); e.layout(r.width, r.height, fill, ytQ);
     if (yt) api<{ tracks: any[] }>(`/ytcaptions?id=${encodeURIComponent(source.id)}`, {}, 1)
       .then(x => { if (x.tracks.length) ev.onTracks(x.tracks.map(t => ({ id: t.id, lang: t.lang, label: t.label, auto: t.auto }))); else e.nativeCaptions?.(); })
@@ -241,9 +264,21 @@ export default function Player({ source, title, subtitle, actions, thumb, onClos
     return () => { save(true); e.destroy(); eng.current = null; clearTimeout(hideT.current); clearTimeout(ap); };
   }, [ref, attempt]); // eslint-disable-line
   useLayoutEffect(() => { const el = stage.current; if (!el) return; const ro = new ResizeObserver(() => { const r = el.getBoundingClientRect(); eng.current?.layout(r.width, r.height, fill, ytQ); }); ro.observe(el); const r = el.getBoundingClientRect(); eng.current?.layout(r.width, r.height, fill, ytQ); return () => ro.disconnect(); }, [fill, attempt, ytQ]);
-  useEffect(() => { eng.current?.setTrack(track?.native ? track : null); setCues([]); setCueText(''); if (!track || track.native) return; let on = true;
-    if (remote || iframe) return; fetch(yt ? `/api/ytcaptions/vtt?id=${encodeURIComponent((source as any).id)}&track=${encodeURIComponent(track.id)}` : `/api/library/file/${(source as any).id}/subs/${track.id}`).then(r => r.ok ? r.text() : Promise.reject()).then(x => { if (on) setCues(parseVtt(x)); }).catch(() => flash('Couldn\'t load those subtitles')); return () => { on = false; }; }, [track?.id]); // eslint-disable-line
-  useEffect(() => { if (!cues.length) { setCueText(''); return; } let raf = 0; const tick = () => { const now = (eng.current?.time() || 0) - offset; const act = cues.filter(c => c.a <= now && c.b >= now).map(c => c.text).join('\n'); setCueText(x => x === act ? x : act); raf = requestAnimationFrame(tick); }; raf = requestAnimationFrame(tick); return () => cancelAnimationFrame(raf); }, [cues, offset]);
+  
+  // Render external cues (from Wing.st) if present
+  useEffect(() => {
+    if (!cues.length) { setCueText(''); return; }
+    let raf = 0;
+    const tick = () => {
+      const now = eng.current?.time() || 0;
+      const act = cues.filter(c => c.a <= now && c.b >= now).map(c => c.text).join('\n');
+      setCueText(x => x === act ? x : act);
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [cues]);
+
   useEffect(() => { if (yt) eng.current?.setSubSize(SIZES.find(x => x[0] === subSize)?.[2] ?? 0); }, [subSize]); // eslint-disable-line
 
   const toggle = () => { const e = eng.current; if (!e) return; if (state === 'ended') { e.seek(0); e.play(); } else if (state === 'playing' || state === 'buffering') e.pause(); else e.play(); wake(); };
@@ -276,11 +311,11 @@ export default function Player({ source, title, subtitle, actions, thumb, onClos
   const sizeLabel = SIZES.find(x => x[0] === subSize)?.[1] || 'Medium';
   const opt = (key: any, on: boolean, children: ReactNode, onClick: () => void) => <button key={key} data-nav data-autofocus={on || undefined} className={'popt' + (on ? ' on' : '')} onClick={onClick}><span className="tick">{on ? Icon.check : null}</span>{children}</button>;
   const row = (label: string, value: string, to: typeof menu) => <button key={label} data-nav className="prow" onClick={() => setMenu(to)}><span>{label}</span><span className="val">{value} ›</span></button>;
+  
   const panel = menu && !iframe && <div className="psettings" data-modal role="dialog" aria-label="Video settings" onClick={e => e.stopPropagation()}>
     {menu === 'main' && <><h3>Video settings</h3>
       {row('Subtitles', track ? track.label : tracks.length ? 'Off' : 'None available', 'subs')}
       {row('Subtitle size', sizeLabel, 'size')}
-      {!track?.native && row('Subtitle timing', `${offset > 0 ? '+' : ''}${offset.toFixed(2)} s`, 'timing')}
       {row('Speed', rate === 1 ? 'Normal' : `${rate}×`, 'speed')}
       {row('Picture', fill ? 'Fill screen' : 'Fit to screen', 'picture')}
       {yt && row('Quality', `${(QUALITIES.find(x => x[0] === ytQ)?.[1] || 'Auto').replace(/ \(.*\)/, '')}${nowQ ? ` · playing ${nowQ}` : ''}`, 'quality')}
@@ -288,18 +323,15 @@ export default function Player({ source, title, subtitle, actions, thumb, onClos
     {menu === 'subs' && <><h3>Subtitles</h3>
       {opt('off', !track, 'Off', () => { pickTrack(null); setMenu('main'); })}
       {tracks.map(x => opt(x.id, track?.id === x.id, x.label, () => { pickTrack(x); setMenu('main'); }))}
-      {!tracks.length && <p className="pnote">{yt ? 'This video has no captions.' : 'No subtitle files found. Put a .srt or .vtt next to the video with the same name (e.g. Movie.en.srt), or in a "Subs" folder beside it.'}</p>}</>}
+      {!tracks.length && <p className="pnote">{yt ? 'This video has no captions.' : 'No subtitle files found.'}</p>}</>}
     {menu === 'size' && <><h3>Subtitle size</h3>{SIZES.map(([k, l]) => opt(k, subSize === k, l, () => { savePrefs({ subSize: k } as any); setMenu('main'); }))}</>}
     {menu === 'speed' && <><h3>Speed</h3>{[0.5, 0.75, 1, 1.25, 1.5, 1.75, 2].filter(r => eng.current?.rates().includes(r) ?? true).map(r => opt(r, rate === r, r === 1 ? 'Normal' : `${r}×`, () => { setSpeed(r); setMenu('main'); }))}</>}
     {menu === 'quality' && <><h3>Quality</h3>
       {QUALITIES.map(([k, l]) => opt(k, ytQ === k, l, () => { savePrefs({ ytQuality: k } as any); flash(`Quality: ${l.replace(/ \(.*\)/, '')}`); setMenu('main'); }))}
-      <p className="pnote">{nowQ ? `Playing ${nowQ} right now. ` : ''}YouTube switches to the chosen quality within a few seconds, if the video and your connection allow it.</p></>}
+      <p className="pnote">{nowQ ? `Playing ${nowQ} right now. ` : ''}YouTube switches to the chosen quality within a few seconds.</p></>}
     {menu === 'picture' && <><h3>Picture</h3>
       {opt('fit', !fill, 'Fit to screen', () => { savePrefs({ picture: 'fit' } as any); setMenu('main'); })}
       {opt('fill', fill, 'Fill screen (crops edges)', () => { savePrefs({ picture: 'fill' } as any); setMenu('main'); })}</>}
-    {menu === 'timing' && <><h3>Subtitle timing</h3><p className="pnote">Move subtitles earlier or later if they're out of sync.</p>
-      <div className="ptiming"><Btn autoFocus onClick={() => setOffset(o => +(o - 0.25).toFixed(2))}>− 0.25 s</Btn><b>{offset > 0 ? '+' : ''}{offset.toFixed(2)} s</b><Btn onClick={() => setOffset(o => +(o + 0.25).toFixed(2))}>+ 0.25 s</Btn></div>
-      {opt('reset', offset === 0, 'Reset', () => setOffset(0))}</>}
   </div>;
 
   return <div ref={wrap} className={'overlay player' + (hidden && !err && !menu && !iframe ? ' hide' : '')} data-modal onMouseMove={wake} data-subsize={subSize}>
@@ -314,18 +346,17 @@ export default function Player({ source, title, subtitle, actions, thumb, onClos
       {!yt || !err.url ? <Btn primary onClick={() => setAttempt(x => x + 1)}>Try again</Btn> : <Btn primary onClick={() => window.open(err.url, '_blank')}>Open on YouTube</Btn>}
       <Btn onClick={onClose}>Back</Btn></div></div></div>}
     
-    {/* The chrome is set to z-index 50 in CSS to sit above the iframe */}
     <div className="chrome" {...(menu ? { inert: '' } : {}) as any}>
       <div className="ptop"><Btn icon={Icon.back} onClick={onClose}>Back</Btn><div className="ptitle"><h2>{title}</h2>{subtitle && <small>{subtitle}</small>}</div>{actions}</div>
       {!err && state !== 'ended' && !iframe && <div className="pbottom">
-        <SeekBar t={t} d={d} buf={buf} onScrub={on => { scrubRef.current = on; setScrub(on); wake(); }} previewSrc={yt || remote ? undefined : `/api/library/file/${(source as any).id}?preview`} onCommit={n => { eng.current?.seek(n); tRef.current = n; setT(n); flash(`Jumped to ${fmt(n)}`); wake(); }} />
+        <SeekBar t={t} d={d} buf={buf} onScrub={on => { scrubRef.current = on; setScrub(on); wake(); }} previewSrc={yt || remote || direct ? undefined : `/api/library/file/${(source as any).id}?preview`} onCommit={n => { eng.current?.seek(n); tRef.current = n; setT(n); flash(`Jumped to ${fmt(n)}`); wake(); }} />
         <div className="times"><span>{fmt(t)}</span>{scrub ? <span className="hint">OK to jump · Back to cancel</span> : <span />}<span>−{fmt(Math.max(0, d - t))}</span></div>
         <div className="row">
           <button data-nav className="iconbtn" aria-label="Back 10 seconds" onClick={() => skip(-10)}>{Icon.rew}</button>
           <button ref={playBtn} data-nav className="iconbtn big" aria-label={playing ? 'Pause' : 'Play'} onClick={toggle}>{playing ? Icon.pause : Icon.play}</button>
           <button data-nav className="iconbtn" aria-label="Forward 30 seconds" onClick={() => skip(30)}>{Icon.fwd}</button>
           <div className="spacer" />
-          <button data-nav className={'iconbtn cc' + (track ? ' on' : '')} aria-label="Subtitles" title="Subtitles (C)" onClick={ccToggle}>CC</button>
+          <button data-nav className={'iconbtn cc' + (track || cues.length ? ' on' : '')} aria-label="Subtitles" title="Subtitles (C)" onClick={ccToggle}>CC</button>
           <button data-nav className="iconbtn" aria-label={muted ? 'Unmute' : 'Mute'} onClick={mute}>{muted ? Icon.mute : Icon.volume}</button>
           <button data-nav className="iconbtn" aria-label="Video settings" title="Video settings (S)" onClick={() => setMenu('main')}>{Glyph.settings}</button>
           <button data-nav className="iconbtn" aria-label="Full screen" onClick={full}>{Icon.full}</button>
