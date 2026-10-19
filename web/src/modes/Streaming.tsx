@@ -1,3 +1,4 @@
+import { providers, getEmbedUrl, DEFAULT_PROVIDER_ID } from '../config/providers';
 import { useEffect, useRef, useState } from 'react';
 import { api, post, del, img } from '../api';
 import { useApp } from '../App';
@@ -63,20 +64,21 @@ function Detail({ sel, back, favs, later }: any) {
   const d = useAsync(() => api(`/tmdb/${sel.type}/${sel.id}`), [sel.id, sel.type]);
   const [trailer, setTrailer] = useState(false), [season, setSeason] = useState(1);
   const [directUrl, setDirectUrl] = useState(''), [directPlaying, setDirectPlaying] = useState(false), [directError, setDirectError] = useState('');
+  const [selectedProvider, setSelectedProvider] = useState(DEFAULT_PROVIDER_ID), [providerPlaying, setProviderPlaying] = useState(false), [episode, setEpisode] = useState(1);
+  useEffect(() => { setEpisode(1); }, [season]); // reset episode when season changes
   const eps = useAsync(() => sel.type === 'tv' ? api(`/tmdb/tv/${sel.id}/season/${season}`) : Promise.resolve(null), [sel.id, season]);
   const sources = useAsync(() => api(`/tmdb/${sel.type}/${sel.id}/watch/providers`), [sel.id, sel.type]);
   const m = d.data; const ref = `${sel.type}:${sel.id}`;
   const vids = m?.videos?.results || []; const tk = vids.find((v: any) => v.site === 'YouTube' && v.type === 'Trailer') || vids.find((v: any) => v.site === 'YouTube');
   useEffect(() => { if (tk) loadYT().catch(() => {}); }, [!!tk]); // eslint-disable-line
   useEffect(() => { if (m?.backdrop_path) setArt({ img: img(m.backdrop_path, 'w1280') }); }, [m]); // eslint-disable-line
-  useEffect(() => { setOverlay(trailer || directPlaying); }, [trailer, directPlaying]); // eslint-disable-line
-  useBack(back, !trailer);
-  useAutoFocus(`${!!m}-${trailer}`); useRestoreFocus(trailer);
+  useEffect(() => { setOverlay(trailer || directPlaying || providerPlaying); }, [trailer, directPlaying, providerPlaying]); // eslint-disable-line
+  useBack(back, !trailer && !providerPlaying);
+  useAutoFocus(`${!!m}-${trailer}-${providerPlaying}`);
   const on = (list: any) => list.data?.some((x: any) => x.ref === ref);
   const toggle = (k: string, list: any) => (on(list) ? del(`/lists?kind=${k}&ref=${encodeURIComponent(ref)}`) : post(`/lists?kind=${k}`, { ref, data: { id: sel.id, type: sel.type, title: m.title || m.name, poster: m.poster_path, backdrop: m.backdrop_path, overview: m.overview } })).then(list.retry);
   const trailerView = trailer && tk && <Player source={{ kind: 'youtube', id: tk.key }} thumb={`https://i.ytimg.com/vi/${tk.key}/hqdefault.jpg`} title={m.title || m.name} subtitle={tk.name || 'Trailer'} volume={s.volume} resume={false} saveProgress={false} onClose={() => setTrailer(false)} />;
-  const directView = directPlaying && <Player source={{ kind: 'remote', url: directUrl }} title={m?.title || m?.name || 'Streaming media'} subtitle="Authorized stream" volume={s.volume} resume={false} onClose={() => setDirectPlaying(false)} />;
-  return <div className="layer" data-modal data-scroll><div className="detail" {...(trailer ? { inert: '' } : {}) as any}>
+  const providerView = providerPlaying && <Player source={{ kind: 'remote', url: getEmbedUrl(selectedProvider, sel.type, sel.id, season, episode) }} title={m?.title || m?.name || 'Streaming media'} subtitle={`Provider: ${providers.find((p: any) => p.id === selectedProvider)?.name ?? selectedProvider}`} volume={s.volume} resume={false} saveProgress={false} onClose={() => setProviderPlaying(false)} />;  return <div className="layer" data-modal data-scroll><div className="detail" {...((trailer || providerPlaying) ? { inert: '' } : {}) as any}>
     <ErrorNotice e={d.error} retry={d.retry} />
     <div className="detail-top"><Btn ghost icon={Icon.back} onClick={back}>Back</Btn></div>
     {!m ? <div className="center">Loading…</div> : <>
@@ -98,6 +100,37 @@ function Detail({ sel, back, favs, later }: any) {
           <Btn icon={Icon.play} onClick={() => { const u = directUrl.trim(); try { const parsed = new URL(u); if (parsed.protocol !== 'https:' && parsed.hostname !== 'localhost' && parsed.hostname !== '127.0.0.1') throw new Error(); setDirectUrl(parsed.href); setDirectPlaying(true); setDirectError(''); } catch { setDirectError('Enter a valid HTTPS media URL (or localhost URL for testing).'); } }}>Play stream</Btn>
         </div>
         {directError && <p className="note" role="alert">{directError}</p>}
+      </section>
+            <section className="shelf source-shelf">
+        <h3>Watch via provider</h3>
+        <p className="sub">Choose a third-party provider to watch this {sel.type === 'movie' ? 'movie' : 'TV episode'}. Playback happens inside the provider's embed — Pi Media Center does not host or proxy this content.</p>
+
+        <div className="seasons">
+          {providers.filter((p: any) => p.enabled !== false).map((p: any) => (
+            <button key={p.id} data-nav className={'choice' + (p.id === selectedProvider ? ' on' : '')} onClick={() => setSelectedProvider(p.id)}>
+              {p.name}{p.speed ? ` · ${p.speed}` : ''}
+            </button>
+          ))}
+        </div>
+
+        {sel.type === 'tv' && <>
+          <div className="seasons">
+            {(m.seasons || []).filter((x: any) => x.season_number > 0).map((x: any) => (
+              <button key={x.id} data-nav className={'choice' + (x.season_number === season ? ' on' : '')} onClick={() => setSeason(x.season_number)}>Season {x.season_number}</button>
+            ))}
+          </div>
+          <div className="searchbar">
+            <select data-nav className="field" value={episode} onChange={e => setEpisode(Number(e.target.value))}>
+              {(eps.data?.episodes || []).map((e: any) => (
+                <option key={e.id} value={e.episode_number}>Episode {e.episode_number}: {e.name}</option>
+              ))}
+            </select>
+          </div>
+        </>}
+
+        <div className="searchbar">
+          <Btn icon={Icon.play} onClick={() => setProviderPlaying(true)}>Play with provider</Btn>
+        </div>
       </section>
       <section className="shelf source-shelf">
         <h3>Where to watch</h3>
@@ -126,5 +159,5 @@ function Detail({ sel, back, favs, later }: any) {
         <div className="episodes">{eps.data?.episodes?.map((e: any) => <div key={e.id} className="episode" data-nav tabIndex={0}><span className="n">{e.episode_number}</span><b>{e.name}{e.runtime ? <small style={{ color: 'var(--dust)', fontWeight: 400 }}>  {e.runtime} min</small> : null}</b><p>{e.overview || 'No description.'}</p></div>)}</div></section>}
       {m.credits?.cast?.length > 0 && <Shelf title="Cast">{m.credits.cast.slice(0, 16).map((c: any) => <div key={c.id} className="person" data-nav tabIndex={0}><div className="face">{c.profile_path && <img loading="lazy" src={img(c.profile_path, 'w185')} alt="" />}</div>{c.name}<small>{c.character}</small></div>)}</Shelf>}
     </>}
-  </div>{trailerView}{directView}</div>;
+  </div>{trailerView}{directView}{providerView}</div>;
 }
