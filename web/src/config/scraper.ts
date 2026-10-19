@@ -1,5 +1,17 @@
-import { getProviders, FullScraperEvents, RunOutput, ScrapeMedia } from "@p-stream/providers";
+import { makeProviders, makeStandardFetcher, targets } from "@jenish094/providers";
+import type { FullScraperEvents, ProviderControls, RunOutput, ScrapeMedia } from "@jenish094/providers";
 import { useCallback, useRef, useState } from "react";
+
+let providersInstance: ProviderControls | null = null;
+function getProviders(): ProviderControls {
+  if (!providersInstance) {
+    providersInstance = makeProviders({
+      fetcher: makeStandardFetcher((url, ops) => fetch(url, ops as RequestInit) as any),
+      target: targets.BROWSER,
+    });
+  }
+  return providersInstance;
+}
 
 export interface ScrapingSegment {
   name: string;
