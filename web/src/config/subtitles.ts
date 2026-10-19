@@ -1,5 +1,3 @@
-// web/src/config/subtitles.ts
-
 export interface WingSubtitle {
   id: string;
   language: string;
