@@ -358,7 +358,7 @@ async function api(req, res, url) {
     res.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'Cache-Control': 'no-store' });
     const send = o => { try { res.write(JSON.stringify(o) + '\n'); } catch {} };
     try {
-      const { makeProviders, makeStandardFetcher, targets } = await import('@jenish094/providers');
+      const { makeProviders, makeStandardFetcher, targets } = await import('@badwinton/providers');
       // consistentIpForRequests: the stream is fetched by this same server (see /api/stream), so IP-locked sources are fine
       const providers = makeProviders({ fetcher: makeStandardFetcher(fetch), target: targets.NATIVE, consistentIpForRequests: true });
       const errText = e => e ? String(e.message || e) : '';
