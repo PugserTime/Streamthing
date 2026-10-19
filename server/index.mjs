@@ -352,25 +352,133 @@ async function proxyStream(req, res, tok) {
 
 async function api(req, res, url) {
   const p = url.pathname, m = req.method; refreshEnv();
-  if (p === '/api/scrape' && m === 'POST') { // runs the stream scrapers in Node (no CORS limits), streams progress as NDJSON
-    const b = JSON.parse(await readBody(req)); const media = b?.media;
-    if (!media || !['movie', 'show'].includes(media.type) || !media.tmdbId) return json(res, 400, { error: 'bad_media', message: 'media with type and tmdbId required' });
-    res.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'Cache-Control': 'no-store' });
-    const send = o => { try { res.write(JSON.stringify(o) + '\n'); } catch {} };
+  if (p === '/api/scrape' && m === 'POST') {
+    let body;
+    try { body = JSON.parse(await readBody(req)); }
+    catch { if (!res.destroyed) return json(res, 400, { error: 'bad_json', message: 'Invalid JSON request.' }); return; }
+    const media = body?.media;
+    const positiveInt = v => Number.isSafeInteger(v) && v > 0;
+    if (!media || !['movie', 'show'].includes(media.type) || !/^\d+$/.test(String(media.tmdbId || '')) ||
+        typeof media.title !== 'string' || !media.title.trim() || media.title.length > 500 ||
+        !positiveInt(media.releaseYear) ||
+        (media.type === 'show' && (!positiveInt(media.season?.number) || !positiveInt(media.episode?.number)))) {
+      return json(res, 400, { error: 'bad_media', message: 'A title, releaseYear, numeric TMDB ID, and valid season/episode numbers for shows are required.' });
+    }
+    const cleanText = value => String(value ?? '')
+      .replace(/https?:\/\/[^\s<>"']+/gi, '[URL redacted]')
+      .replace(/\b(authorization|cookie|token|api[_-]?key|signature|password)\b\s*[:=]\s*[^\s,;]+/gi, '$1=[redacted]')
+      .replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '');
+    const ctl = new AbortController();
+    const debug = env.SCRAPE_DEBUG === '1';
+    let finished = false;
+    const onClose = () => { if (!finished) ctl.abort(); };
+    res.on('close', onClose);
+    const send = value => {
+      if (!finished && !res.destroyed && !res.writableEnded) res.write(JSON.stringify(value) + '\n');
+    };
+    res.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no' });
+    res.flushHeaders();
+    log('INFO', `scrape media: ${JSON.stringify({ type: media.type, tmdbId: String(media.tmdbId), title: cleanText(media.title), releaseYear: media.releaseYear, season: media.season?.number, episode: media.episode?.number })}`);
+    const classify = e => {
+      const text = String(e?.name || '') + ' ' + String(e?.message || e || '');
+      if (/timeout|timedout/i.test(text)) return 'timeout';
+      if (/abort/i.test(text)) return 'aborted';
+      if (/cannot read|undefined|unexpected|json|invalid.*response/i.test(text)) return 'unexpected_response';
+      if (/http|status.*[45]\d\d/i.test(text)) return 'http_error';
+      if (/notfound|not found|no valid stream|couldn.t find|no stream/i.test(text)) return 'not_found';
+      return 'provider_error';
+    };
+    // Log metadata and response structure only; never upstream body values or signed URLs.
+    const inspectShape = async response => {
+      let reader, timer;
+      try {
+        if (!response.body) return 'no_body';
+        reader = response.clone().body.getReader();
+        const chunks = []; let size = 0;
+        const deadline = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('preview_timeout')), 500); });
+        for (;;) {
+          const part = await Promise.race([reader.read(), deadline]);
+          if (part.done) break;
+          size += part.value.byteLength;
+          if (size > 4096) return 'body_over_4096_bytes';
+          chunks.push(Buffer.from(part.value));
+        }
+        const text = Buffer.concat(chunks).toString('utf8').trim();
+        let value;
+        try { value = JSON.parse(text); }
+        catch { return text.startsWith('<') ? 'html_or_xml' : 'non_json'; }
+        if (!value || typeof value !== 'object') return `json_${value === null ? 'null' : typeof value}`;
+        if (Array.isArray(value)) return `json_array length=${value.length}`;
+        const shape = v => Array.isArray(v) ? `array(${v.length})` : v === null ? 'null' : typeof v;
+        return `json_object items=${shape(value.items)} stream=${shape(value.stream)}`;
+      } catch { return 'shape_unavailable'; }
+      finally { clearTimeout(timer); if (reader) { void reader.cancel().catch(() => {}); } }
+    };
+    const scraperFetch = async (input, init = {}) => {
+      const signal = AbortSignal.any([ctl.signal, AbortSignal.timeout(15000), ...(init.signal ? [init.signal] : input instanceof Request && input.signal ? [input.signal] : [])]);
+      const started = Date.now();
+      // Host only: paths and query strings may themselves contain credentials.
+      let host = 'unknown';
+      try { host = new URL(input instanceof Request ? input.url : String(input)).hostname; } catch {}
+      try {
+        const response = await fetch(input, { ...init, signal });
+        if (debug) {
+          log('INFO', `scrape upstream host=${host} status=${response.status} contentType=${cleanText(response.headers.get('content-type') || '').slice(0, 100)} ms=${Date.now() - started}`);
+          if (/json|text|html/i.test(response.headers.get('content-type') || '')) {
+            void inspectShape(response).then(shape => log('INFO', `scrape response host=${host} shape=${shape}`));
+          }
+        }
+        return response;
+      } catch (e) {
+        if (debug) log('WARN', `scrape upstream host=${host} category=${classify(e)} ms=${Date.now() - started}`);
+        throw e;
+      }
+    };
+    let deadline;
     try {
       const { makeProviders, makeStandardFetcher, targets } = await import('@jenish094/providers');
-      // consistentIpForRequests: the stream is fetched by this same server (see /api/stream), so IP-locked sources are fine
-      const providers = makeProviders({ fetcher: makeStandardFetcher(fetch), target: targets.NATIVE, consistentIpForRequests: true });
-      const errText = e => e ? String(e.message || e) : '';
-      const upd = d => { const msg = errText(d.error); if (msg) log('WARN', `scrape source ${d.id} failed: ${msg.slice(0, 160)}`); else if (d.reason) log('INFO', `scrape source ${d.id}: ${d.reason}`); send({ ev: 'update', d: { id: d.id, percentage: d.percentage, status: d.status, reason: d.reason ?? (msg || undefined) } }); };
-      const out = await providers.runAll({ media, events: { init: d => send({ ev: 'init', d }), start: d => send({ ev: 'start', d }), update: upd, discoverEmbeds: d => send({ ev: 'discoverEmbeds', d }) } });
-      let play = null; const st = out?.stream;
-      if (st?.type === 'hls' && st.playlist) play = { url: `/api/stream/${streamToken(st.playlist, st.headers)}.m3u8`, type: 'hls' };
-      else if (st?.qualities) { const q = st.qualities; const pick = ['4k', '1080', '720', '480', '360', 'unknown'].map(k => q[k]?.url && q[k]).find(Boolean) || Object.values(q).find(v => v?.url); if (pick) play = { url: `/api/stream/${streamToken(pick.url, st.headers)}`, type: 'mp4' }; }
-      send({ done: true, play, sourceId: out?.sourceId || null });
-      log('INFO', `scrape ${media.type} ${media.tmdbId}: ${play ? 'found via ' + out.sourceId : 'no source'}`);
-    } catch (e) { log('ERROR', `scrape failed: ${String(e.message).slice(0, 160)}`); send({ done: true, play: null, error: String(e.message).slice(0, 200) }); }
-    return res.end();
+      const providers = makeProviders({ fetcher: makeStandardFetcher(scraperFetch), target: targets.NATIVE, consistentIpForRequests: true });
+      const update = d => {
+        const reason = d.reason || (d.error ? d.error.message || String(d.error) : undefined);
+        const category = d.error ? classify(d.error) : d.status === 'notfound' ? 'not_found' : undefined;
+        if (d.error) log('WARN', `scrape source ${cleanText(d.id)} category=${category}: ${cleanText(d.error.stack || d.error.message || d.error).slice(0, 12000)}`);
+        else if (reason) log('INFO', `scrape source ${cleanText(d.id)}: ${cleanText(reason).slice(0, 500)}`);
+        send({ ev: 'update', d: { id: d.id, percentage: d.percentage, status: d.status, reason: reason ? cleanText(reason).slice(0, 300) : undefined, category } });
+      };
+      const job = providers.runAll({ media, events: {
+        init: d => send({ ev: 'init', d }), start: d => send({ ev: 'start', d }),
+        update, discoverEmbeds: d => send({ ev: 'discoverEmbeds', d }),
+      } });
+      const limit = new Promise((_, reject) => {
+        deadline = setTimeout(() => { ctl.abort(); reject(new Error('Scrape timeout after 90 seconds')); }, 90000);
+      });
+      const result = await Promise.race([job, limit]);
+      const stream = result?.stream;
+      const validUrl = value => {
+        if (typeof value !== 'string' || !value.trim()) return false;
+        try { const u = new URL(value); return /^https?:$/.test(u.protocol) && !u.username && !u.password; } catch { return false; }
+      };
+      let play = null;
+      if (stream?.type === 'hls' && validUrl(stream.playlist)) {
+        play = { url: `/api/stream/${streamToken(stream.playlist, stream.headers)}.m3u8`, type: 'hls' };
+      } else if (stream?.qualities && typeof stream.qualities === 'object') {
+        const q = stream.qualities;
+        const pick = ['4k', '2160', '1440', '1080', '720', '480', '360', 'unknown'].map(k => q[k]).find(v => validUrl(v?.url)) || Object.values(q).find(v => validUrl(v?.url));
+        if (pick) play = { url: `/api/stream/${streamToken(pick.url, stream.headers)}`, type: 'mp4' };
+      }
+      send({ done: true, play, sourceId: result?.sourceId || null });
+      log('INFO', `scrape ${media.type} ${media.tmdbId}: ${play ? 'found via ' + cleanText(result.sourceId) : 'no usable source'}`);
+    } catch (e) {
+      log('ERROR', `scrape failed category=${classify(e)}: ${cleanText(e?.stack || e).slice(0, 12000)}`);
+      send({ done: true, play: null, error: classify(e) === 'timeout' ? 'The source search timed out.' : 'No direct stream could be loaded. Try an embedded player.' });
+    } finally {
+      clearTimeout(deadline);
+      finished = true;
+      ctl.abort();
+      res.off('close', onClose);
+      if (!res.destroyed && !res.writableEnded) res.end();
+    }
+    return;
   }
   if (p.startsWith('/api/stream/') && (m === 'GET' || m === 'HEAD')) return proxyStream(req, res, p.slice('/api/stream/'.length).replace(/\.m3u8$/, ''));
   if (p === '/api/status') return json(res, 200, { version: VERSION, adminRequired: ADMIN_REQUIRED, exe: IS_EXE, dataDir: DATA, envFile, inTemp: /[\\/](temp|tmp)[\\/]/i.test(ROOT) || /\.zip/i.test(ROOT), keyHints: { tmdb: hint(env.TMDB_API_KEY), youtube: hint(env.YOUTUBE_API_KEY) }, tmdb: !!env.TMDB_API_KEY, youtube: !!env.YOUTUBE_API_KEY, platform: process.platform, arch: process.arch });
