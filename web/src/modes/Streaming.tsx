@@ -1,5 +1,5 @@
 import { getEmbedUrl, providers } from '../config/providers';
-import { useScraper, ScrapingSegment } from '../config/scraper';
+import { useScraper } from '../config/scraper';
 import { fetchWingSubtitles, loadSubtitleCues, WingSubtitle, Cue } from '../config/subtitles';
 import { useEffect, useRef, useState } from 'react';
 import { api, post, del, img } from '../api';
@@ -73,12 +73,10 @@ function Detail({ sel, back, favs, later }: any) {
   const [trailer, setTrailer] = useState(false), [season, setSeason] = useState(1);
   const [episode, setEpisode] = useState(1);
 
-  // Scraper state
   const { startScraping, sources, currentSource } = useScraper();
   const [scraping, setScraping] = useState(false);
   const [activeStream, setActiveStream] = useState<{ url: string; type: 'hls' | 'mp4' } | null>(null);
 
-  // Subtitle state
   const [subs, setSubs] = useState<WingSubtitle[]>([]);
   const [subPicker, setSubPicker] = useState(false);
   const [activeSub, setActiveSub] = useState<WingSubtitle | null>(null);
@@ -163,7 +161,6 @@ function Detail({ sel, back, favs, later }: any) {
     </div>
   );
 
-  // P-Stream Scraper Overlay
   const scraperOverlay = scraping && (
     <div style={{ position: 'fixed', inset: 0, zIndex: 2000, background: 'rgba(0,0,0,0.85)', display: 'flex', alignItems: 'center', justifyContent: 'center', backdropFilter: 'blur(4px)' }}>
       <div style={{ background: 'var(--bg)', padding: 32, borderRadius: 16, minWidth: 400, maxWidth: 500, boxShadow: '0 10px 30px rgba(0,0,0,0.5)' }}>
@@ -171,7 +168,7 @@ function Detail({ sel, back, favs, later }: any) {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: '50vh', overflowY: 'auto', paddingRight: 8 }}>
           {Object.values(sources).map((src) => (
             <div key={src.id} style={{ 
-              display: 'flex', alignItems: 'center', justifyItems: 'center', gap: 12, padding: '10px 14px', borderRadius: 8,
+              display: 'flex', alignItems: 'center', gap: 12, padding: '10px 14px', borderRadius: 8,
               background: src.id === currentSource ? 'rgba(255,255,255,0.1)' : 'transparent',
               border: '1px solid ' + (src.id === currentSource ? 'var(--accent)' : 'transparent'),
               transition: 'all 0.2s ease',
