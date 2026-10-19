@@ -1,4 +1,4 @@
-import { providers, getEmbedUrl, DEFAULT_PROVIDER_ID, getNextEnabledProviderId } from '../config/providers';
+import { getEmbedUrl, providers, DEFAULT_PROVIDER_ID } from '../config/providers';
 import { useEffect, useRef, useState } from 'react';
 import { api, post, del, img } from '../api';
 import { useApp } from '../App';
@@ -63,86 +63,78 @@ function Detail({ sel, back, favs, later }: any) {
   const { s, setArt, setOverlay } = useApp();
   const d = useAsync(() => api(`/tmdb/${sel.type}/${sel.id}`), [sel.id, sel.type]);
   const [trailer, setTrailer] = useState(false), [season, setSeason] = useState(1);
-  const [currentProvider, setCurrentProvider] = useState(DEFAULT_PROVIDER_ID);
-  const [failedProviders, setFailedProviders] = useState<string[]>([]);
-  const [playing, setPlaying] = useState(false);
   const [episode, setEpisode] = useState(1);
-  const [showSourceFinder, setShowSourceFinder] = useState(false);
-  const [findingStatus, setFindingStatus] = useState<Record<string, 'pending' | 'success' | 'error'>>({});
+  const [picker, setPicker] = useState(false);
+  const [activeProvider, setActiveProvider] = useState<string | null>(null);
   const eps = useAsync(() => sel.type === 'tv' ? api(`/tmdb/tv/${sel.id}/season/${season}`) : Promise.resolve(null), [sel.id, season]);
   const m = d.data; const ref = `${sel.type}:${sel.id}`;
   const vids = m?.videos?.results || []; const tk = vids.find((v: any) => v.site === 'YouTube' && v.type === 'Trailer') || vids.find((v: any) => v.site === 'YouTube');
   useEffect(() => { if (tk) loadYT().catch(() => {}); }, [!!tk]); // eslint-disable-line
   useEffect(() => { if (m?.backdrop_path) setArt({ img: img(m.backdrop_path, 'w1280') }); }, [m]); // eslint-disable-line
   useEffect(() => { setEpisode(1); }, [season]);
-  useEffect(() => { setOverlay(trailer || playing); }, [trailer, playing]); // eslint-disable-line
-  useBack(back, !trailer && !playing);
-  useAutoFocus(`${!!m}-${trailer}-${playing}`); useRestoreFocus(trailer);
+  useEffect(() => { setOverlay(trailer || !!activeProvider); }, [trailer, activeProvider]); // eslint-disable-line
+  useBack(back, !trailer && !activeProvider);
+  useAutoFocus(`${!!m}-${trailer}-${!!activeProvider}`); useRestoreFocus(trailer);
 
-  // Listen for iframe error messages and cycle to the next provider
-  useEffect(() => {
-    const handler = (e: MessageEvent) => {
-      if (!playing) return;
-      const msg = typeof e.data === 'string' ? e.data : (e.data?.error ?? e.data?.message ?? '');
-      if (typeof msg === 'string' && /error|not found|unavailable|playable/i.test(msg)) {
-        setFindingStatus((s) => ({ ...s, [currentProvider]: 'error' }));
-        const next = getNextEnabledProviderId(currentProvider, [...failedProviders, currentProvider]);
-        if (next) {
-          setFailedProviders((prev) => [...prev, currentProvider]);
-          setCurrentProvider(next);
-          setFindingStatus((s) => ({ ...s, [next]: 'pending' }));
-        } else {
-          setPlaying(false);
-        }
-      } else {
-        setFindingStatus((s) => ({ ...s, [currentProvider]: 'success' }));
-      }
-    };
-    window.addEventListener('message', handler);
-    return () => window.removeEventListener('message', handler);
-  }, [playing, currentProvider, failedProviders]);
-
-  const startPlay = () => {
-    setFailedProviders([]);
-    setCurrentProvider(DEFAULT_PROVIDER_ID);
-    setFindingStatus({ [DEFAULT_PROVIDER_ID]: 'pending' });
-    setShowSourceFinder(true);
-    setPlaying(true);
+  const openInBrowser = (id: string) => {
+    const url = getEmbedUrl(id, sel.type, sel.id, season, episode);
+    window.open(url, '_blank', 'noopener,noreferrer');
+  };
+  const nextProvider = () => {
+    if (!activeProvider) return;
+    const enabled = providers.filter(p => p.enabled);
+    const i = enabled.findIndex(p => p.id === activeProvider);
+    setActiveProvider(enabled[(i + 1) % enabled.length].id);
   };
 
   const on = (list: any) => list.data?.some((x: any) => x.ref === ref);
   const toggle = (k: string, list: any) => (on(list) ? del(`/lists?kind=${k}&ref=${encodeURIComponent(ref)}`) : post(`/lists?kind=${k}`, { ref, data: { id: sel.id, type: sel.type, title: m.title || m.name, poster: m.poster_path, backdrop: m.backdrop_path, overview: m.overview } })).then(list.retry);
   const trailerView = trailer && tk && <Player source={{ kind: 'youtube', id: tk.key }} thumb={`https://i.ytimg.com/vi/${tk.key}/hqdefault.jpg`} title={m.title || m.name} subtitle={tk.name || 'Trailer'} volume={s.volume} resume={false} saveProgress={false} onClose={() => setTrailer(false)} />;
-  const playView = playing && <Player source={{ kind: 'remote', url: getEmbedUrl(currentProvider, sel.type, sel.id, season, episode) }} title={m?.title || m?.name || 'Streaming media'} subtitle={`Provider: ${providers.find((p: any) => p.id === currentProvider)?.name ?? currentProvider}`} volume={s.volume} resume={false} saveProgress={false} onClose={() => { setPlaying(false); setShowSourceFinder(false); }} />;
+  const providerView = activeProvider && <Player
+    source={{ kind: 'iframe', url: getEmbedUrl(activeProvider, sel.type, sel.id, season, episode) }}
+    title={m?.title || m?.name || 'Streaming'}
+    subtitle={`Provider: ${providers.find(p => p.id === activeProvider)?.name ?? activeProvider}`}
+    resume={false}
+    saveProgress={false}
+    actions={<>
+      <Btn icon={Icon.refresh} onClick={nextProvider}>Try next</Btn>
+      <Btn icon={Icon.play} onClick={() => openInBrowser(activeProvider)}>Open in browser</Btn>
+    </>}
+    onClose={() => setActiveProvider(null)}
+  />;
 
-  // Visual source-finder modal
-  const sourceFinder = showSourceFinder && (
-    <div className="layer" data-modal style={{ position: 'fixed', inset: 0, zIndex: 1100, background: 'rgba(0,0,0,0.85)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-      <div style={{ background: 'var(--bg)', padding: 24, borderRadius: 12, minWidth: 360, maxWidth: 480 }}>
-        <h3 style={{ marginTop: 0 }}>Finding a source…</h3>
-        <p className="sub" style={{ marginBottom: 16 }}>Trying providers until one works.</p>
-        <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
-          {providers.filter((p) => p.enabled).map((p) => {
-            const status = findingStatus[p.id];
-            return (
-              <li key={p.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 0', borderBottom: '1px solid var(--line)' }}>
-                <span style={{ width: 20, textAlign: 'center' }}>
-                  {status === 'success' ? '✅' : status === 'error' ? '❌' : status === 'pending' ? '⏳' : '•'}
-                </span>
-                <span style={{ flex: 1 }}>{p.name}</span>
-                {status === 'pending' && <span className="spinner" style={{ width: 14, height: 14, border: '2px solid var(--dust)', borderTopColor: 'var(--accent)', borderRadius: '50%', animation: 'spin 1s linear infinite' }} />}
-              </li>
-            );
-          })}
-        </ul>
-        {Object.values(findingStatus).every((s) => s === 'error') && (
-          <p className="note" style={{ marginTop: 12 }}>All providers failed. Try again later.</p>
-        )}
+  const pickerView = picker && (
+    <div style={{ position: 'fixed', inset: 0, zIndex: 1100, background: 'rgba(0,0,0,0.88)', display: 'grid', placeItems: 'center', padding: 20 }}>
+      <div style={{ background: 'var(--bg)', color: 'var(--fg)', padding: 24, borderRadius: 12, maxWidth: 560, width: '100%' }}>
+        <h3 style={{ marginTop: 0 }}>Choose a source</h3>
+        <p style={{ opacity: 0.7, marginBottom: 16, fontSize: '0.9em', lineHeight: 1.4 }}>
+          Providers sometimes block being embedded. If the screen stays blank, use <b>Open in browser</b> in the player's top bar.
+        </p>
+        {sel.type === 'tv' && <>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
+            {(m.seasons || []).filter((x: any) => x.season_number > 0).map((x: any) => (
+              <button key={x.id} className={'choice' + (x.season_number === season ? ' on' : '')} onClick={() => setSeason(x.season_number)}>Season {x.season_number}</button>
+            ))}
+          </div>
+          <select className="field" value={episode} onChange={e => setEpisode(Number(e.target.value))} style={{ marginBottom: 16, width: '100%' }}>
+            {(eps.data?.episodes || []).map((e: any) => <option key={e.id} value={e.episode_number}>Episode {e.episode_number}: {e.name}</option>)}
+          </select>
+        </>}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+          {providers.filter(p => p.enabled).map(p => (
+            <Btn key={p.id} onClick={() => { setPicker(false); setActiveProvider(p.id); }}>
+              {p.name}{p.speed ? ` · ${p.speed}` : ''}
+            </Btn>
+          ))}
+        </div>
+        <div style={{ marginTop: 16, textAlign: 'right' }}>
+          <Btn ghost onClick={() => setPicker(false)}>Cancel</Btn>
+        </div>
       </div>
     </div>
   );
 
-  return <div className="layer" data-modal data-scroll><div className="detail" {...((trailer || playing) ? { inert: '' } : {}) as any}>
+  return <div className="layer" data-modal data-scroll><div className="detail" {...((trailer || activeProvider) ? { inert: '' } : {}) as any}>
     <ErrorNotice e={d.error} retry={d.retry} />
     <div className="detail-top"><Btn ghost icon={Icon.back} onClick={back}>Back</Btn></div>
     {!m ? <div className="center">Loading…</div> : <>
@@ -152,9 +144,9 @@ function Detail({ sel, back, favs, later }: any) {
         {m.genres?.slice(0, 3).map((g: any) => <span key={g.id} className="fact">{g.name}</span>)}</div>
       <p className="overview">{m.overview || 'No description yet.'}</p>
       <div className="actions">
-        {tk && <Btn primary autoFocus icon={Icon.play} onClick={() => setTrailer(true)}>Watch trailer</Btn>}
-        <Btn primary autoFocus={!tk} icon={Icon.play} onClick={startPlay}>Play</Btn>
-        <Btn autoFocus={!tk} icon={on(favs) ? Icon.heartFill : Icon.heart} onClick={() => toggle('favorite', favs)}>{on(favs) ? 'In favorites' : 'Add to favorites'}</Btn>
+        <Btn primary autoFocus icon={Icon.play} onClick={() => setPicker(true)}>Play</Btn>
+        {tk && <Btn autoFocus={!tk} icon={Icon.play} onClick={() => setTrailer(true)}>Watch trailer</Btn>}
+        <Btn icon={on(favs) ? Icon.heartFill : Icon.heart} onClick={() => toggle('favorite', favs)}>{on(favs) ? 'In favorites' : 'Add to favorites'}</Btn>
         <Btn icon={on(later) ? Icon.check : Icon.plus} onClick={() => toggle('watchlater', later)}>{on(later) ? 'On watch later' : 'Watch later'}</Btn>
       </div>
       {sel.type === 'tv' && m.seasons?.length > 0 && <section className="shelf"><h3>Episodes</h3>
@@ -163,5 +155,5 @@ function Detail({ sel, back, favs, later }: any) {
         <div className="episodes">{eps.data?.episodes?.map((e: any) => <div key={e.id} className="episode" data-nav tabIndex={0}><span className="n">{e.episode_number}</span><b>{e.name}{e.runtime ? <small style={{ color: 'var(--dust)', fontWeight: 400 }}>  {e.runtime} min</small> : null}</b><p>{e.overview || 'No description.'}</p></div>)}</div></section>}
       {m.credits?.cast?.length > 0 && <Shelf title="Cast">{m.credits.cast.slice(0, 16).map((c: any) => <div key={c.id} className="person" data-nav tabIndex={0}><div className="face">{c.profile_path && <img loading="lazy" src={img(c.profile_path, 'w185')} alt="" />}</div>{c.name}<small>{c.character}</small></div>)}</Shelf>}
     </>}
-  </div>{trailerView}{sourceFinder}{playView}</div>;
+  </div>{trailerView}{pickerView}{providerView}</div>;
 }
