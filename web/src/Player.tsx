@@ -3,6 +3,7 @@ import { api, put, fmt } from './api';
 import { useApp } from './App';
 import { Btn, Glyph, Icon, useBack } from './ui';
 import 'lite-youtube-embed';
+import Hls from 'hls.js';
 import { Cue } from './config/subtitles';
 
 export type Source = 
@@ -31,23 +32,6 @@ interface Engine { play(): void; pause(): void; seek(t: number): void; time(): n
   setTrack(t: Track | null): void; setSubSize(n: number): void; nativeCaptions?(): void; layout(w: number, h: number, fill: boolean, quality?: string): void; quality?(): string; destroy(): void }
 type Ev = { onTime(t: number, d: number): void; onState(s: 'playing' | 'paused' | 'buffering' | 'ended'): void; onReady(d: number): void; onError(msg: string, openUrl?: string): void; onTracks(t: Track[]): void };
 
-// ── Dynamic HLS Loader (avoids npm dependencies) ──────────────────────────
-let hlsLoaded: Promise<any> | null = null;
-function loadHls(): Promise<any> {
-  if ((window as any).Hls) return Promise.resolve((window as any).Hls);
-  if (!hlsLoaded) {
-    hlsLoaded = new Promise((resolve, reject) => {
-      const script = document.createElement('script');
-      script.src = 'https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js';
-      script.onload = () => resolve((window as any).Hls);
-      script.onerror = () => reject(new Error('Failed to load HLS.js'));
-      document.head.appendChild(script);
-    });
-  }
-  return hlsLoaded;
-}
-
-// ---------- YouTube ----------
 export const QUALITIES: [string, string, number][] = [['auto', 'Auto (sharp for your screen)', 0], ['2160', 'Best available (up to 4K)', 2160], ['1440', '1440p', 1440], ['1080', '1080p', 1080], ['720', '720p', 720], ['480', 'Data saver (480p)', 480]];
 const Q_LABEL: Record<string, string> = { tiny: '144p', small: '240p', medium: '360p', large: '480p', hd720: '720p', hd1080: '1080p', hd1440: '1440p', hd2160: '4K', highres: '4K+' };
 const VQ: Record<string, string> = { '2160': 'hd2160', '1440': 'hd1440', '1080': 'hd1080', '720': 'hd720', '480': 'large', auto: 'hd1080' };
@@ -120,7 +104,6 @@ function youtubeEngine(host: HTMLElement, id: string, ev: Ev, volume: number, wa
   };
 }
 
-// ---------- local file via <video> ----------
 const MEDIA_ERR: Record<number, string> = { 1: 'Playback was stopped.', 2: 'The file couldn\'t be read.', 3: 'The file is damaged.', 4: 'This video uses a format the player can\'t decode.' };
 function fileEngine(host: HTMLElement, id: number, ev: Ev, volume: number, attempt: number): Engine {
   const v = document.createElement('video'); v.autoplay = true; v.playsInline = true; v.preload = 'auto'; v.volume = volume; v.src = `/api/library/file/${id}?r=${attempt}`;
@@ -138,24 +121,21 @@ function fileEngine(host: HTMLElement, id: number, ev: Ev, volume: number, attem
   };
 }
 
-// ---------- remote/direct stream via <video> + CDN hls.js ----------
 function directEngine(host: HTMLElement, url: string, type: 'hls' | 'mp4' | undefined, ev: Ev, volume: number): Engine {
   const v = document.createElement('video'); v.autoplay = true; v.playsInline = true; v.preload = 'auto'; v.volume = volume;
-  let hls: any = null;
+  let hls: Hls | null = null;
 
   if (type === 'hls' && !v.canPlayType('application/vnd.apple.mpegurl')) {
-    loadHls().then(Hls => {
-      if (Hls && Hls.isSupported()) {
-        hls = new Hls();
-        hls.loadSource(url);
-        hls.attachMedia(v);
-        hls.on(Hls.Events.ERROR, (_event: any, data: any) => {
-          if (data.fatal) ev.onError('HLS stream failed to load. Try another source.');
-        });
-      } else {
-        v.src = url;
-      }
-    }).catch(() => ev.onError('Failed to load HLS support.'));
+    if (Hls.isSupported()) {
+      hls = new Hls();
+      hls.loadSource(url);
+      hls.attachMedia(v);
+      hls.on(Hls.Events.ERROR, (_event, data) => {
+        if (data.fatal) ev.onError('HLS stream failed to load. Try another source.');
+      });
+    } else {
+      ev.onError('HLS is not supported in this browser.');
+    }
   } else {
     v.src = url;
   }
@@ -174,7 +154,6 @@ function directEngine(host: HTMLElement, url: string, type: 'hls' | 'mp4' | unde
   };
 }
 
-// ---------- iframe ----------
 function iframeEngine(host: HTMLElement, url: string, ev: Ev): Engine {
   const wrap = document.createElement('div'); wrap.style.cssText = 'position:absolute;inset:0;background:#000;';
   const frame = document.createElement('iframe'); frame.src = url;
