@@ -1,4 +1,3 @@
-// web/src/config/scraper.ts
 import { getProviders, FullScraperEvents, RunOutput, ScrapeMedia } from "@p-stream/providers";
 import { useCallback, useRef, useState } from "react";
 
@@ -19,10 +18,8 @@ export function useScraper() {
   const lastId = useRef<string | null>(null);
 
   const initEvent = useCallback((evt: ScraperEvent<"init">) => {
-    // Note: getProviders().listSources() gives us the metadata
     const allSources = getProviders().listSources();
     const newSources: Record<string, ScrapingSegment> = {};
-    
     evt.sourceIds.forEach(id => {
       const meta = allSources.find(s => s.id === id);
       newSources[id] = {
@@ -80,16 +77,10 @@ export function useScraper() {
     setSources({});
     lastId.current = null;
     const providers = getProviders();
-    
     try {
       const output: RunOutput | null = await providers.runAll({
         media,
-        events: {
-          init: initEvent,
-          start: startEvent,
-          update: updateEvent,
-          discoverEmbeds: discoverEmbedsEvent,
-        },
+        events: { init: initEvent, start: startEvent, update: updateEvent, discoverEmbeds: discoverEmbedsEvent },
       });
       return output;
     } catch (err) {
