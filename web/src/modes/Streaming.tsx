@@ -1,4 +1,4 @@
-import { providers, getEmbedUrl, DEFAULT_PROVIDER_ID } from '../config/providers';
+import { providers, getEmbedUrl, DEFAULT_PROVIDER_ID, getNextEnabledProviderId } from '../config/providers';
 import { useEffect, useRef, useState } from 'react';
 import { api, post, del, img } from '../api';
 import { useApp } from '../App';
@@ -63,24 +63,47 @@ function Detail({ sel, back, favs, later }: any) {
   const { s, setArt, setOverlay } = useApp();
   const d = useAsync(() => api(`/tmdb/${sel.type}/${sel.id}`), [sel.id, sel.type]);
   const [trailer, setTrailer] = useState(false), [season, setSeason] = useState(1);
-  const [directUrl, setDirectUrl] = useState(''), [directPlaying, setDirectPlaying] = useState(false), [directError, setDirectError] = useState('');
-  const [selectedProvider, setSelectedProvider] = useState(DEFAULT_PROVIDER_ID), [providerPlaying, setProviderPlaying] = useState(false), [episode, setEpisode] = useState(1);
+  const [currentProvider, setCurrentProvider] = useState(DEFAULT_PROVIDER_ID);
+  const [failedProviders, setFailedProviders] = useState<string[]>([]);
+  const [playing, setPlaying] = useState(false);
+  const [episode, setEpisode] = useState(1);
   const eps = useAsync(() => sel.type === 'tv' ? api(`/tmdb/tv/${sel.id}/season/${season}`) : Promise.resolve(null), [sel.id, season]);
-  const sources = useAsync(() => api(`/tmdb/${sel.type}/${sel.id}/watch/providers`), [sel.id, sel.type]);
   const m = d.data; const ref = `${sel.type}:${sel.id}`;
   const vids = m?.videos?.results || []; const tk = vids.find((v: any) => v.site === 'YouTube' && v.type === 'Trailer') || vids.find((v: any) => v.site === 'YouTube');
   useEffect(() => { if (tk) loadYT().catch(() => {}); }, [!!tk]); // eslint-disable-line
   useEffect(() => { if (m?.backdrop_path) setArt({ img: img(m.backdrop_path, 'w1280') }); }, [m]); // eslint-disable-line
   useEffect(() => { setEpisode(1); }, [season]);
-  useEffect(() => { setOverlay(trailer || directPlaying || providerPlaying); }, [trailer, directPlaying, providerPlaying]); // eslint-disable-line
-  useBack(back, !trailer && !providerPlaying);
-  useAutoFocus(`${!!m}-${trailer}-${providerPlaying}`); useRestoreFocus(trailer);
+  useEffect(() => { setOverlay(trailer || playing); }, [trailer, playing]); // eslint-disable-line
+  useBack(back, !trailer && !playing);
+  useAutoFocus(`${!!m}-${trailer}-${playing}`); useRestoreFocus(trailer);
+
+  // Listen for error messages from the provider iframe and fall back to the next provider
+  useEffect(() => {
+    const handler = (e: MessageEvent) => {
+      if (!playing) return;
+      // Many embed providers send a plain string or an object with an error flag.
+      const data = typeof e.data === 'string' ? e.data : (e.data?.error ?? e.data?.message ?? '');
+      if (typeof data === 'string' && /error|not found|unavailable|playable/i.test(data)) {
+        const next = getNextEnabledProviderId(currentProvider, failedProviders);
+        if (next) {
+          setFailedProviders((prev) => [...prev, currentProvider]);
+          setCurrentProvider(next);
+        } else {
+          // All providers failed – stop trying and show a message
+          setPlaying(false);
+        }
+      }
+    };
+    window.addEventListener('message', handler);
+    return () => window.removeEventListener('message', handler);
+  }, [playing, currentProvider, failedProviders]);
+
   const on = (list: any) => list.data?.some((x: any) => x.ref === ref);
   const toggle = (k: string, list: any) => (on(list) ? del(`/lists?kind=${k}&ref=${encodeURIComponent(ref)}`) : post(`/lists?kind=${k}`, { ref, data: { id: sel.id, type: sel.type, title: m.title || m.name, poster: m.poster_path, backdrop: m.backdrop_path, overview: m.overview } })).then(list.retry);
   const trailerView = trailer && tk && <Player source={{ kind: 'youtube', id: tk.key }} thumb={`https://i.ytimg.com/vi/${tk.key}/hqdefault.jpg`} title={m.title || m.name} subtitle={tk.name || 'Trailer'} volume={s.volume} resume={false} saveProgress={false} onClose={() => setTrailer(false)} />;
-  const directView = directPlaying && <Player source={{ kind: 'remote', url: directUrl }} title={m?.title || m?.name || 'Streaming media'} subtitle="Authorized stream" volume={s.volume} resume={false} onClose={() => setDirectPlaying(false)} />;
-  const providerView = providerPlaying && <Player source={{ kind: 'remote', url: getEmbedUrl(selectedProvider, sel.type, sel.id, season, episode) }} title={m?.title || m?.name || 'Streaming media'} subtitle={`Provider: ${providers.find((p: any) => p.id === selectedProvider)?.name ?? selectedProvider}`} volume={s.volume} resume={false} saveProgress={false} onClose={() => setProviderPlaying(false)} />;
-  return <div className="layer" data-modal data-scroll><div className="detail" {...((trailer || providerPlaying) ? { inert: '' } : {}) as any}>
+  const playView = playing && <Player source={{ kind: 'remote', url: getEmbedUrl(currentProvider, sel.type, sel.id, season, episode) }} title={m?.title || m?.name || 'Streaming media'} subtitle={`Provider: ${providers.find((p: any) => p.id === currentProvider)?.name ?? currentProvider}`} volume={s.volume} resume={false} saveProgress={false} onClose={() => setPlaying(false)} />;
+
+  return <div className="layer" data-modal data-scroll><div className="detail" {...((trailer || playing) ? { inert: '' } : {}) as any}>
     <ErrorNotice e={d.error} retry={d.retry} />
     <div className="detail-top"><Btn ghost icon={Icon.back} onClick={back}>Back</Btn></div>
     {!m ? <div className="center">Loading…</div> : <>
@@ -91,72 +114,15 @@ function Detail({ sel, back, favs, later }: any) {
       <p className="overview">{m.overview || 'No description yet.'}</p>
       <div className="actions">
         {tk && <Btn primary autoFocus icon={Icon.play} onClick={() => setTrailer(true)}>Watch trailer</Btn>}
+        <Btn primary autoFocus={!tk} icon={Icon.play} onClick={() => { setFailedProviders([]); setCurrentProvider(DEFAULT_PROVIDER_ID); setPlaying(true); }}>Play</Btn>
         <Btn autoFocus={!tk} icon={on(favs) ? Icon.heartFill : Icon.heart} onClick={() => toggle('favorite', favs)}>{on(favs) ? 'In favorites' : 'Add to favorites'}</Btn>
         <Btn icon={on(later) ? Icon.check : Icon.plus} onClick={() => toggle('watchlater', later)}>{on(later) ? 'On watch later' : 'Watch later'}</Btn>
       </div>
-      <section className="shelf source-shelf">
-        <h3>Play an authorized stream</h3>
-        <p className="sub">If you have a direct HTTPS MP4/WebM URL or a stream URL you are authorized to use, paste it here to play it in Pi Media Center. HLS playback depends on browser support. Provider embed pages are not direct video URLs.</p>
-        <div className="searchbar">
-          <input className="field" type="url" inputMode="url" placeholder="https://example.com/video.mp4" value={directUrl} onChange={e => { setDirectUrl(e.target.value); setDirectError(''); }} onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); const u = directUrl.trim(); try { const parsed = new URL(u); if (parsed.protocol !== 'https:' && parsed.hostname !== 'localhost' && parsed.hostname !== '127.0.0.1') throw new Error(); setDirectUrl(parsed.href); setDirectPlaying(true); setDirectError(''); } catch { setDirectError('Enter a valid HTTPS media URL (or localhost URL for testing).'); } } }} />
-          <Btn icon={Icon.play} onClick={() => { const u = directUrl.trim(); try { const parsed = new URL(u); if (parsed.protocol !== 'https:' && parsed.hostname !== 'localhost' && parsed.hostname !== '127.0.0.1') throw new Error(); setDirectUrl(parsed.href); setDirectPlaying(true); setDirectError(''); } catch { setDirectError('Enter a valid HTTPS media URL (or localhost URL for testing).'); } }}>Play stream</Btn>
-        </div>
-        {directError && <p className="note" role="alert">{directError}</p>}
-      </section>
-      <section className="shelf source-shelf">
-        <h3>Watch via provider</h3>
-        <p className="sub">Choose a third-party provider to watch this {sel.type === 'movie' ? 'movie' : 'TV episode'}. Playback happens inside the provider's embed — Pi Media Center does not host or proxy this content.</p>
-        <div className="seasons">
-          {providers.filter((p: any) => p.enabled !== false).map((p: any) => (
-            <button key={p.id} data-nav className={'choice' + (p.id === selectedProvider ? ' on' : '')} onClick={() => setSelectedProvider(p.id)}>
-              {p.name}{p.speed ? ` · ${p.speed}` : ''}
-            </button>
-          ))}
-        </div>
-        {sel.type === 'tv' && <>
-          <div className="seasons">
-            {(m.seasons || []).filter((x: any) => x.season_number > 0).map((x: any) => (
-              <button key={x.id} data-nav className={'choice' + (x.season_number === season ? ' on' : '')} onClick={() => setSeason(x.season_number)}>Season {x.season_number}</button>
-            ))}
-          </div>
-          <div className="searchbar">
-            <select data-nav className="field" value={episode} onChange={e => setEpisode(Number(e.target.value))}>
-              {(eps.data?.episodes || []).map((e: any) => (
-                <option key={e.id} value={e.episode_number}>Episode {e.episode_number}: {e.name}</option>
-              ))}
-            </select>
-          </div>
-        </>}
-        <div className="searchbar">
-          <Btn icon={Icon.play} onClick={() => setProviderPlaying(true)}>Play with provider</Btn>
-        </div>
-      </section>
-      <section className="shelf source-shelf">
-        <h3>Where to watch</h3>
-        <p className="sub">Official services available in the United States. Choose a provider to open its viewing page; playback and any subscription requirements are handled by that service.</p>
-        <ErrorNotice e={sources.error} retry={sources.retry} />
-        {(() => {
-          const us = sources.data?.results?.US;
-          const groups = [
-            ['Included with subscription', us?.flatrate],
-            ['Free', us?.free],
-            ['Free with ads', us?.ads],
-            ['Rent', us?.rent],
-            ['Buy', us?.buy],
-          ].filter((g: any) => g[1]?.length);
-          return groups.length ? groups.map(([label, items]: any) => <div className="source-group" key={label}>
-            <h4>{label}</h4><div className="source-list">{items.map((provider: any) => <a className="source-link" key={provider.provider_id} href={us.link} target="_blank" rel="noopener noreferrer">
-              {provider.logo_path && <img src={img(provider.logo_path, 'w92')} alt="" loading="lazy" />}<span>{provider.provider_name}</span><span className="source-arrow">↗</span>
-            </a>)}</div>
-          </div>) : <p className="note">{sources.loading ? 'Checking official provider availability…' : 'No official provider availability was returned for the United States. You can still watch the trailer or play your own media files.'}</p>;
-        })()}
-      </section>
-      <p className="note">Trailers play from YouTube. Your own video files play from My Media. Pi Media Center does not host third-party movies or bypass provider access controls.</p>
       {sel.type === 'tv' && m.seasons?.length > 0 && <section className="shelf"><h3>Episodes</h3>
         <div className="seasons">{m.seasons.filter((s: any) => s.season_number > 0).map((s: any) => <button key={s.id} data-nav className={'choice' + (s.season_number === season ? ' on' : '')} onClick={() => setSeason(s.season_number)}>Season {s.season_number}</button>)}</div>
         <ErrorNotice e={eps.error} retry={eps.retry} />
         <div className="episodes">{eps.data?.episodes?.map((e: any) => <div key={e.id} className="episode" data-nav tabIndex={0}><span className="n">{e.episode_number}</span><b>{e.name}{e.runtime ? <small style={{ color: 'var(--dust)', fontWeight: 400 }}>  {e.runtime} min</small> : null}</b><p>{e.overview || 'No description.'}</p></div>)}</div></section>}
       {m.credits?.cast?.length > 0 && <Shelf title="Cast">{m.credits.cast.slice(0, 16).map((c: any) => <div key={c.id} className="person" data-nav tabIndex={0}><div className="face">{c.profile_path && <img loading="lazy" src={img(c.profile_path, 'w185')} alt="" />}</div>{c.name}<small>{c.character}</small></div>)}</Shelf>}
     </>}
-  </div>{trailerView}{directView}{providerView}</div>;
+  </div>{trailerView}{playView}</div>;
 }
