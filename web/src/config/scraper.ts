@@ -1,4 +1,4 @@
-import type { FullScraperEvents } from "@jenish094/providers";
+import type { FullScraperEvents } from "@badwinton/pstream-providers";
 import { useCallback, useRef, useState } from "react";
 
 export interface PlayableStream { url: string; type: "hls" | "mp4" }
