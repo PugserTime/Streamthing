@@ -3,7 +3,6 @@ import { api, put, fmt } from './api';
 import { useApp } from './App';
 import { Btn, Glyph, Icon, useBack } from './ui';
 import 'lite-youtube-embed';
-import Hls from 'hls.js';
 import { Cue } from './config/subtitles';
 
 export type Source = 
@@ -23,7 +22,7 @@ type Props = {
   volume?: number; 
   resume?: boolean; 
   saveProgress?: boolean;
-  cues?: Cue[]; // External subtitles
+  cues?: Cue[];
 };
 
 export type Track = { id: string; lang: string; label: string; raw?: any; native?: boolean; auto?: boolean };
@@ -31,6 +30,22 @@ export type Track = { id: string; lang: string; label: string; raw?: any; native
 interface Engine { play(): void; pause(): void; seek(t: number): void; time(): number; dur(): number; buffered(): number; setVolume(v: number): void; setMuted(m: boolean): void; setRate(r: number): void; rates(): number[];
   setTrack(t: Track | null): void; setSubSize(n: number): void; nativeCaptions?(): void; layout(w: number, h: number, fill: boolean, quality?: string): void; quality?(): string; destroy(): void }
 type Ev = { onTime(t: number, d: number): void; onState(s: 'playing' | 'paused' | 'buffering' | 'ended'): void; onReady(d: number): void; onError(msg: string, openUrl?: string): void; onTracks(t: Track[]): void };
+
+// ── Dynamic HLS Loader (avoids npm dependencies) ──────────────────────────
+let hlsLoaded: Promise<any> | null = null;
+function loadHls(): Promise<any> {
+  if ((window as any).Hls) return Promise.resolve((window as any).Hls);
+  if (!hlsLoaded) {
+    hlsLoaded = new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = 'https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js';
+      script.onload = () => resolve((window as any).Hls);
+      script.onerror = () => reject(new Error('Failed to load HLS.js'));
+      document.head.appendChild(script);
+    });
+  }
+  return hlsLoaded;
+}
 
 // ---------- YouTube ----------
 export const QUALITIES: [string, string, number][] = [['auto', 'Auto (sharp for your screen)', 0], ['2160', 'Best available (up to 4K)', 2160], ['1440', '1440p', 1440], ['1080', '1080p', 1080], ['720', '720p', 720], ['480', 'Data saver (480p)', 480]];
@@ -123,26 +138,33 @@ function fileEngine(host: HTMLElement, id: number, ev: Ev, volume: number, attem
   };
 }
 
-// ---------- remote/direct stream via <video> + hls.js ----------
+// ---------- remote/direct stream via <video> + CDN hls.js ----------
 function directEngine(host: HTMLElement, url: string, type: 'hls' | 'mp4' | undefined, ev: Ev, volume: number): Engine {
   const v = document.createElement('video'); v.autoplay = true; v.playsInline = true; v.preload = 'auto'; v.volume = volume;
-  let hls: Hls | null = null;
+  let hls: any = null;
 
-  if (type === 'hls' && Hls.isSupported()) {
-    hls = new Hls();
-    hls.loadSource(url);
-    hls.attachMedia(v);
-    hls.on(Hls.Events.ERROR, (_event, data) => {
-      if (data.fatal) ev.onError('HLS stream failed to load. Try another source.');
-    });
+  if (type === 'hls' && !v.canPlayType('application/vnd.apple.mpegurl')) {
+    loadHls().then(Hls => {
+      if (Hls && Hls.isSupported()) {
+        hls = new Hls();
+        hls.loadSource(url);
+        hls.attachMedia(v);
+        hls.on(Hls.Events.ERROR, (_event: any, data: any) => {
+          if (data.fatal) ev.onError('HLS stream failed to load. Try another source.');
+        });
+      } else {
+        v.src = url;
+      }
+    }).catch(() => ev.onError('Failed to load HLS support.'));
   } else {
-    v.src = url; // Native MP4 or Safari native HLS
+    v.src = url;
   }
 
   v.onloadedmetadata = () => ev.onReady(v.duration); v.ontimeupdate = () => ev.onTime(v.currentTime, v.duration);
   v.onplaying = () => ev.onState('playing'); v.onpause = () => ev.onState('paused'); v.onwaiting = () => ev.onState('buffering'); v.onended = () => ev.onState('ended');
   v.onerror = () => ev.onError('This URL did not provide a playable video. Check the link, format, or CORS policy.');
   host.appendChild(v);
+  
   return {
     play: () => { v.play().catch(() => {}); }, pause: () => v.pause(), seek: t => { v.currentTime = Math.max(0, Math.min(v.duration || t, t)); }, time: () => v.currentTime, dur: () => v.duration || 0,
     buffered: () => { try { const b = v.buffered, n = v.currentTime; for (let i = 0; i < b.length; i++) if (b.start(i) <= n + 1 && b.end(i) >= n) return b.end(i) / (v.duration || 1); } catch {} return 0; },
@@ -265,7 +287,6 @@ export default function Player({ source, title, subtitle, actions, thumb, onClos
   }, [ref, attempt]); // eslint-disable-line
   useLayoutEffect(() => { const el = stage.current; if (!el) return; const ro = new ResizeObserver(() => { const r = el.getBoundingClientRect(); eng.current?.layout(r.width, r.height, fill, ytQ); }); ro.observe(el); const r = el.getBoundingClientRect(); eng.current?.layout(r.width, r.height, fill, ytQ); return () => ro.disconnect(); }, [fill, attempt, ytQ]);
   
-  // Render external cues (from Wing.st) if present
   useEffect(() => {
     if (!cues.length) { setCueText(''); return; }
     let raf = 0;
