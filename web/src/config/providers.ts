@@ -2,75 +2,135 @@
 export interface Provider {
   id: string;
   name: string;
-  speed?: string;
+  baseUrl: string;
   enabled: boolean;
-  movie: (tmdbId: number | string) => string;
-  tv: (tmdbId: number | string, season: number, episode: number) => string;
+  tag?: string;
+  speed?: 'Ultra Fast' | 'Fast' | 'HD' | '4K Ready';
+  isDefault?: boolean;
 }
 
 export const providers: Provider[] = [
-  {
-    id: 'vidsrc-to',
-    name: 'VidSrc',
-    speed: 'Fast',
-    enabled: true,
-    movie: (id) => `https://vidsrc.to/embed/movie/${id}`,
-    tv: (id, s, e) => `https://vidsrc.to/embed/tv/${id}/${s}/${e}`,
-  },
-  {
-    id: 'vidsrc-me',
-    name: 'VidSrc.me',
-    enabled: true,
-    movie: (id) => `https://vidsrc.me/embed/movie?tmdb=${id}`,
-    tv: (id, s, e) => `https://vidsrc.me/embed/tv?tmdb=${id}&season=${s}&episode=${e}`,
-  },
-  {
-    id: 'embed-su',
-    name: 'Embed.su',
-    enabled: true,
-    movie: (id) => `https://embed.su/embed/movie/${id}`,
-    tv: (id, s, e) => `https://embed.su/embed/tv/${id}/${s}/${e}`,
-  },
-  {
-    id: 'vidlink',
-    name: 'VidLink',
-    enabled: true,
-    movie: (id) => `https://vidlink.pro/movie/${id}`,
-    tv: (id, s, e) => `https://vidlink.pro/tv/${id}/${s}/${e}`,
-  },
-  {
-    id: '2embed',
-    name: '2Embed',
-    enabled: true,
-    movie: (id) => `https://www.2embed.cc/embed/${id}`,
-    tv: (id, s, e) => `https://www.2embed.cc/embedtv/${id}&s=${s}&e=${e}`,
-  },
-  {
-    id: 'multiembed',
-    name: 'MultiEmbed',
-    enabled: true,
-    movie: (id) => `https://multiembed.mov/?video_id=${id}&tmdb=1`,
-    tv: (id, s, e) => `https://multiembed.mov/?video_id=${id}&tmdb=1&s=${s}&e=${e}`,
-  },
+  { id: 'cinemaos', name: 'Aether 1 (Primary)', baseUrl: 'https://cinemaos.tech', enabled: true, tag: 'Default Engine', speed: 'Ultra Fast', isDefault: true },
+  { id: 'vidking', name: 'Nebula Stream X', baseUrl: 'https://www.vidking.net', enabled: true, tag: 'Next Episode', speed: '4K Ready' },
+  { id: 'vidlink', name: 'Hyperion Link', baseUrl: 'https://vidlink.pro', enabled: true, tag: 'Zero Buffer', speed: 'HD' },
+  { id: 'vidsrc_to', name: 'Solaris Cloud', baseUrl: 'https://vidsrc.to/embed', enabled: true, tag: 'VIP Server', speed: 'Ultra Fast' },
+  { id: 'vidnest', name: 'Chronos Node', baseUrl: 'https://vidnest.fun', enabled: true, tag: 'Direct Node', speed: 'HD' },
+  { id: 'vidfast', name: 'Vortex Quantum', baseUrl: 'https://vidfast.net', enabled: true, tag: 'Fast Buffer', speed: 'Fast' },
+  { id: 'videasy', name: 'Elysium Edge', baseUrl: 'https://player.videasy.net', enabled: true, tag: 'Global Edge', speed: 'Fast' },
+  { id: 'vidsrc_me', name: 'Pulsar Relay', baseUrl: 'https://vsembed.ru/embed', enabled: true, tag: 'Backup Server', speed: 'HD' },
+  { id: 'vidup', name: 'Titan Mesh', baseUrl: 'https://vidup.to', enabled: true, tag: 'Adaptive Mesh', speed: 'Fast' },
+  { id: 'rivestream', name: 'Zenith Direct', baseUrl: 'https://rivestream.org/embed', enabled: true, tag: 'High Bitrate', speed: '4K Ready' },
+  { id: 'vidcore', name: 'Astral Core 9', baseUrl: 'https://vidcore.org', enabled: true, tag: 'VidCore Core', speed: 'Ultra Fast' },
 ];
 
-export const DEFAULT_PROVIDER_ID = providers[0].id;
+export const DEFAULT_PROVIDER_ID = 'cinemaos';
 
-export function getEmbedUrl(
-  providerId: string,
+export const getEmbedUrl = (
+  providerId: string = DEFAULT_PROVIDER_ID,
   type: 'movie' | 'tv',
-  id: number | string,
-  season?: number,
-  episode?: number
-): string {
-  const provider = providers.find((p) => p.id === providerId) || providers[0];
-  if (type === 'movie') return provider.movie(id);
-  return provider.tv(id, season ?? 1, episode ?? 1);
-}
+  tmdbId: string | number,
+  season: number = 1,
+  episode: number = 1
+): string => {
+  const selected = providers.find((p) => p.id === providerId) || providers[0];
+  const cleanId = String(tmdbId);
 
-export function getNextEnabledProviderId(currentId: string): string {
-  const enabled = providers.filter((p) => p.enabled !== false);
-  if (!enabled.length) return DEFAULT_PROVIDER_ID;
+  // CinemaOS
+  if (selected.id === 'cinemaos') {
+    return type === 'movie'
+      ? `${selected.baseUrl}/player/${cleanId}`
+      : `${selected.baseUrl}/player/${cleanId}/${season}/${episode}`;
+  }
+
+  // VidKing
+  if (selected.id === 'vidking') {
+    let url = '';
+    if (type === 'movie') {
+      url = `${selected.baseUrl}/embed/movie/${cleanId}?color=e50914`;
+    } else {
+      url = `${selected.baseUrl}/embed/tv/${cleanId}/${season}/${episode}?color=e50914&nextEpisode=true&episodeSelector=true`;
+    }
+    return url;
+  }
+
+  // VidCore
+  if (selected.id === 'vidcore') {
+    const path = type === 'movie'
+      ? `${selected.baseUrl}/embed/movie/${cleanId}`
+      : `${selected.baseUrl}/embed/tv/${cleanId}/${season}/${episode}`;
+    const params = new URLSearchParams({ theme: 'F59E0B', color: 'F59E0B', autoplay: '1' });
+    return `${path}?${params.toString()}`;
+  }
+
+  // VidLink Pro
+  if (selected.id === 'vidlink') {
+    return type === 'movie'
+      ? `${selected.baseUrl}/movie/${cleanId}`
+      : `${selected.baseUrl}/tv/${cleanId}/${season}/${episode}`;
+  }
+
+  // vidsrc.to (VIP)
+  if (selected.id === 'vidsrc_to') {
+    return type === 'movie'
+      ? `${selected.baseUrl}/movie/${cleanId}`
+      : `${selected.baseUrl}/tv/${cleanId}/${season}/${episode}`;
+  }
+
+  // VidNest
+  if (selected.id === 'vidnest') {
+    return type === 'movie'
+      ? `${selected.baseUrl}/movie/${cleanId}`
+      : `${selected.baseUrl}/tv/${cleanId}/${season}/${episode}`;
+  }
+
+  // VidFast
+  if (selected.id === 'vidfast') {
+    return type === 'movie'
+      ? `${selected.baseUrl}/movie/${cleanId}`
+      : `${selected.baseUrl}/tv/${cleanId}/${season}/${episode}`;
+  }
+
+  // VidEasy
+  if (selected.id === 'videasy') {
+    return type === 'movie'
+      ? `${selected.baseUrl}/movie/${cleanId}`
+      : `${selected.baseUrl}/tv/${cleanId}/${season}/${episode}`;
+  }
+
+  // vidsrc.me
+  if (selected.id === 'vidsrc_me') {
+    return type === 'movie'
+      ? `${selected.baseUrl}/movie/${cleanId}`
+      : `${selected.baseUrl}/tv/${cleanId}/${season}/${episode}`;
+  }
+
+  // VidUp
+  if (selected.id === 'vidup') {
+    return type === 'movie'
+      ? `${selected.baseUrl}/movie/${cleanId}`
+      : `${selected.baseUrl}/tv/${cleanId}/${season}/${episode}`;
+  }
+
+  // RiveStream
+  if (selected.id === 'rivestream') {
+    return type === 'movie'
+      ? `${selected.baseUrl}/movie/${cleanId}`
+      : `${selected.baseUrl}/tv/${cleanId}/${season}/${episode}`;
+  }
+
+  // Generic fallback
+  return type === 'movie'
+    ? `${selected.baseUrl}/movie/${cleanId}`
+    : `${selected.baseUrl}/tv/${cleanId}/${season}/${episode}`;
+};
+
+export const getNextEnabledProviderId = (
+  currentId: string,
+  failedIds: string[] = []
+): string | null => {
+  const enabled = providers.filter((p) => p.enabled && !failedIds.includes(p.id));
+  if (enabled.length === 0) return null;
   const idx = enabled.findIndex((p) => p.id === currentId);
-  return enabled[(idx + 1) % enabled.length].id;
-}
+  if (idx === -1 || idx === enabled.length - 1) return enabled[0].id;
+  return enabled[idx + 1].id;
+};
